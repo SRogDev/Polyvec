@@ -4,11 +4,32 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 7 (this branch `phase-7-harden`): reliability tests, bearer auth +
-  rate limiting, benchmark harness — implementation done, measurement runs
-  in progress.
+- (none — Phase 7 complete on branch `phase-7-harden`, awaiting coordinator
+  review/PR)
 
 ## Done
+- 2026-10-15 — **Phase 7 done** (branch `phase-7-harden`, 6 commits):
+  reliability, quality and performance. No new product features except
+  the two Phase 3-deferred security items, now **implemented**:
+  bearer-token auth (`POLYVEC_API_KEY`, constant-time compare, key
+  redacted from logs) + per-IP token-bucket rate limiting
+  (`POLYVEC_RATE_LIMIT_RPS`, default 1000, 429 + `Retry-After`).
+  Reliability: ~21 new tests (concurrent read/write soak with exact
+  live-count assertion, concurrent search during insert, fuzz
+  canonicalizer/chunker, duplicate/idempotent jobs under concurrency,
+  200-deep metadata rejection, URL-source-never-fetched). Benchmark
+  harness `crates/polyvec-bench` (Criterion + `bench_report`, layers
+  A/B/C) with committed fixtures and raw JSON. Measured (release,
+  2026-10-15): 875 vec/s bulk insert (10k dim64), recall@10 = 1.0000,
+  1.70 ms search (ef 50), 422 qps, 5255 B/vec RAM, 2725 B/vec disk,
+  0.74 ms/doc pipeline, 0.104 s time-to-first-result, MRR = 1.0
+  (by construction). Evidence: 244 workspace tests pass, clippy
+  `-D warnings` clean, `cargo fmt --check` clean, `cargo deny check`
+  green. `cargo audit` does not build in this sandbox (linker env
+  quirk, same as Phase 0); advisory coverage via `cargo deny`.
+  Qdrant comparison not performed (no container runtime; documented
+  as infeasible, no uncontrolled numbers). Known limitations in
+  README.md and BENCHMARKS.md.
 - 2026-10-15 — **Phase 6 done** (branch `phase-6-relations`, unmerged):
   integrated relationship retrieval. Typed, directed, explicitly-supplied
   relations (fixed vocabulary: `references`, `related_to`, `supersedes`;
