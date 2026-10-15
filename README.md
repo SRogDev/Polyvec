@@ -25,7 +25,7 @@ phase is done, execution is running):
 | 4 | Canonical model + ingestion pipeline | done |
 | 5 | Lexical and hybrid retrieval | done |
 | 6 | Integrated relationship retrieval | done |
-| 7 | Reliability, quality and performance | planned |
+| 7 | Reliability, quality and performance | done (this branch) |
 | 8 | Documentation and AI-native DX | planned |
 | 9 | MVP release | planned |
 
@@ -41,6 +41,7 @@ crates/polyvec-server/    # Actix Web HTTP API: /v1 routes, schemas, config, gra
 crates/polyvec-ingestion/ # ingestion pipeline: converter, canonical model, chunking, jobs
 crates/polyvec-embeddings/ # embedding provider trait, stub + remote HTTP adapters
 crates/polyvec-retrieval/  # lexical (tantivy) + hybrid (RRF) + relationship-aware retrieval
+crates/polyvec-bench/     # benchmark harness: fixtures, Criterion benches, bench_report (layers A/B/C)
 vendor/markit/            # vendored markit (pinned 4197c76a; HTTP stubbed, mimalloc removed)
 docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
@@ -71,8 +72,9 @@ delete), plus `/healthz`/`/readyz`. Errors are structured JSON
 Corrupt/Storage/Internal details stay server-side. All storage work runs on
 the blocking pool (`web::block`) so CPU-bound HNSW ops never stall request
 workers. The server binds localhost by default and refuses non-loopback
-binds without explicit opt-in — **there is no authentication in Phase 3**
-(see `SECURITY.md`). Quickstart: `cargo run -p polyvec-server --bin polyvec-server`, then
+binds without explicit opt-in — **authentication is opt-in via
+`POLYVEC_API_KEY`** (Phase 7; off by default, see `docs/API.md` and
+`SECURITY.md`). Quickstart: `cargo run -p polyvec-server --bin polyvec-server`, then
 `curl localhost:8080/healthz`; full reference in `docs/API.md`, runnable
 smoke test in `docs/e2e.sh`.
 
@@ -122,6 +124,38 @@ fixture proves the mechanism: three documents where only A mentions the
 query term, `A → B → C` — lexical alone returns A, lexical + `expand`
 returns A, B, C with exact evidence paths. Full semantics in
 `docs/retrieval.md`; live smoke test in `docs/e2e-relations.sh`.
+
+**Phase 7 in one paragraph:** reliability, quality, and performance —
+no new product features except the two Phase 3-deferred security items.
+New tests: concurrent read/write soaks, restart-during-writes recovery,
+write-failure paths, duplicate/idempotent job submission under
+concurrency, malformed vectors (NaN/Infinity, dimension mismatch),
+deeply-nested metadata rejection, input-size limits, and a fuzz harness
+over the canonicalizer/chunker (300 hostile rounds, fixed seed).
+`POLYVEC_API_KEY` enables a bearer-token auth hook on `/v1` (constant-time
+compare, key redacted from logs; `/healthz`/`/readyz` stay open) and
+`POLYVEC_RATE_LIMIT_RPS` a per-IP token-bucket limiter (default 1000,
+`429` + `Retry-After`). `crates/polyvec-bench` adds the benchmark harness:
+Criterion benches, committed fixtures, and `bench_report` measuring three
+layers — (A) vector engine (recall@10 vs exact ground truth, search
+latency, QPS, RAM/disk per vector, bulk-insert throughput, rebuild and
+recovery time), (B) knowledge pipeline (conversion by format, per-doc
+stage timing, runner behavior under scripted provider failures), (C)
+end-to-end over HTTP (self-query MRR/recall@5/nDCG@5, time-to-first-useful-result,
+restart durability). Results in `BENCHMARKS.md` — measured, not claimed.
+
+## Known limitations
+
+- The stub embedding provider is a hash function: retrieval quality
+  numbers measure pipeline mechanics, not semantic search quality.
+- Benchmarks are single-machine, single-workload, release profile;
+  no cross-hardware or cross-system comparisons are published.
+- Rate limiting is an in-memory, per-process token bucket (resets on
+  restart; behind a proxy it sees the proxy's IP).
+- Recovery after `kill -9` over HTTP is untested; restart recovery is
+  covered at the storage layer and graceful-shutdown recovery over HTTP.
+- `cargo audit` does not build in this sandbox (linker env quirk);
+  advisory coverage comes from `cargo deny check` (`advisories`).
 
 ## License
 

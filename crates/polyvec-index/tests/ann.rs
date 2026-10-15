@@ -317,3 +317,57 @@ fn tempfile_dir(name: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7 reliability: concurrent search during insert
+// ---------------------------------------------------------------------------
+
+/// One writer inserts while four readers search (the index is `Sync` by
+/// construction — `hnsw_rs` interior mutability). No panic, no deadlock, and
+/// the final count is exact.
+#[test]
+fn concurrent_search_during_insert() {
+    use std::sync::{Arc, Barrier};
+
+    let dim = 32u32;
+    let index = Arc::new(AnnIndex::new(DistanceMetric::Cosine, &params(), dim));
+    let mut rng = Rng(0xBEEF);
+    let seed = unit_vectors(&mut rng, 200, dim as usize);
+    for (i, v) in seed.iter().enumerate() {
+        index.insert(i, v).unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(6)); // 1 writer + 4 readers + main
+    let mut handles = Vec::new();
+    {
+        let index = Arc::clone(&index);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut rng = Rng(0xCAFE);
+            let more = unit_vectors(&mut rng, 200, dim as usize);
+            for (j, v) in more.iter().enumerate() {
+                index.insert(200 + j, v).unwrap();
+            }
+        }));
+    }
+    for r in 0..4u64 {
+        let index = Arc::clone(&index);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut rng = Rng(0x1000 + r);
+            let tombstones = TombstoneSet::new();
+            for _ in 0..50 {
+                let q: Vec<f32> = (0..dim).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+                let hits = index.search(&q, 5, 64, &tombstones).unwrap();
+                assert!(hits.len() <= 5);
+            }
+        }));
+    }
+    barrier.wait();
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+    assert_eq!(index.len(), 400);
+}

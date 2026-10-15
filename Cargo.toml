@@ -8,6 +8,7 @@ members = [
     "crates/polyvec-retrieval",
     "crates/polyvec-storage",
     "crates/polyvec-server",
+    "crates/polyvec-bench",
 ]
 # The vendored markit tree is a plain path dependency (it declares its own
 # empty [workspace] so it never joins this one); excluded here so Cargo does
@@ -37,6 +38,7 @@ polyvec-embeddings = { path = "crates/polyvec-embeddings", version = "0.1.0" }
 polyvec-index = { path = "crates/polyvec-index", version = "0.1.0" }
 polyvec-ingestion = { path = "crates/polyvec-ingestion", version = "0.1.0" }
 polyvec-retrieval = { path = "crates/polyvec-retrieval", version = "0.1.0" }
+polyvec-server = { path = "crates/polyvec-server", version = "0.1.0" }
 polyvec-storage = { path = "crates/polyvec-storage", version = "0.1.0" }
 
 [workspace.lints.rust]

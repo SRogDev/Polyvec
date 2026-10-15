@@ -1017,3 +1017,50 @@ async fn delete_of_missing_document_still_scrubs_lexical() {
         vec![LexicalCall::Remove { doc_id }],
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7 reliability: concurrent duplicate submission, idempotent re-ingest
+// ---------------------------------------------------------------------------
+
+/// Sixteen threads submit with the SAME idempotency key at once (barrier
+/// synchronized). Exactly one job is created; every submitter gets that job
+/// id back. `find_or_create` serializes on redb's single writer, so the
+/// losers observe the winner's pending job.
+#[test]
+fn concurrent_duplicate_submission_creates_one_job() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tmp("idem-race");
+    let store = Arc::new(JobStore::open(&dir.join("jobs.redb")).unwrap());
+    let collection = CollectionId::new("kb").unwrap();
+    let barrier = Arc::new(Barrier::new(17));
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let collection = collection.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            store
+                .find_or_create(&collection, "src://race", JobOp::Ingest, "key-race-1", 3)
+                .map(|(job, _created)| job.id.clone())
+        }));
+    }
+    barrier.wait();
+    let mut ids = Vec::new();
+    for h in handles {
+        ids.push(
+            h.join()
+                .expect("submitter panicked")
+                .expect("find_or_create failed"),
+        );
+    }
+    let first = &ids[0];
+    assert!(
+        ids.iter().all(|id| id == first),
+        "all submitters must see one job id, got: {ids:?}"
+    );
+    let jobs = store.list_for_collection(&collection, 100).unwrap();
+    assert_eq!(jobs.len(), 1, "exactly one job row, got {}", jobs.len());
+}
