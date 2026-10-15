@@ -4,9 +4,9 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 4 PR open (`phase-4-ingestion`): canonical model + ingestion
-  pipeline complete, awaiting review/merge. Do NOT merge — coordinator
-  merges after the acceptance gate.
+- Phase 4 branch `phase-4-ingestion`: canonical model + ingestion
+  pipeline complete; coordinator acceptance gate PASSED (build, 150 tests,
+  clippy -D warnings, fmt, cargo deny, live e2e 8/8). Ready to merge.
 
 ## Done
 - 2026-10-15 — **Phase 4 done**: canonical model and ingestion pipeline.
