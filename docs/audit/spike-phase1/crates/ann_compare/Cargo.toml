@@ -1,0 +1,9 @@
+[package]
+name = "ann_compare"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hnsw_rs = "0.3.5"
+zvec-rs = { git = "https://github.com/thedonmon/zvec-rs", branch = "master" }
+anyhow = "1"

@@ -39,17 +39,17 @@ The definitive plan defines seven crates with fixed responsibilities.
 **Only `polyvec-core` exists in Phase 0** — the other six are created in the
 phase that first needs them (see "No empty placeholder crates" below).
 
-| Crate | Responsibility (plan §4) | Created in |
-| ----- | ------------------------ | ---------- |
-| `polyvec-core` | Domain vocabulary: types, validated IDs, config contracts, shared `Error` | Phase 0 (now) |
-| `polyvec-index` | Vector index implementations (HNSW et al.), bounded graph retrieval | Phase 2 |
-| `polyvec-store` | Durable segment storage, manifest, WAL | Phase 3 |
-| `polyvec-embed` | Embedding provider adapters (pluggable) | Phase 4 |
-| `polyvec-api` | Actix Web HTTP surface | Phase 5 |
-| `polyvec-serve` | Binary: wiring, config loading, graceful shutdown | Phase 6 |
-| `polyvec-bench` | Benchmark harnesses backing `BENCHMARKS.md` | Phase 7 |
+| Crate | Responsibility (plan §4) | First needed |
+| ----- | ------------------------ | ------------ |
+| `polyvec-core` | Domain vocabulary: types, validated IDs, config contracts, shared `Error` | Phase 0 (exists) |
+| `polyvec-index` | Vector index: hnsw_rs wrapper, Polyvec-owned tombstones, exact-search baseline | Phase 2 |
+| `polyvec-storage` | Durable catalog: redb-backed collections/documents/metadata, persistence, recovery | Phase 2 |
+| `polyvec-server` | Actix Web routes, API schemas, config, graceful shutdown | Phase 3 |
+| `polyvec-ingestion` | Canonical model, chunking, ingestion jobs, converter adapter (markit) | Phase 4 |
+| `polyvec-embeddings` | Provider interface, adapters, batching, dimension validation | Phase 4 |
+| `polyvec-retrieval` | Lexical (tantivy), hybrid fusion, result contract (Phase 5); bounded graph retrieval (Phase 6) | Phase 5 |
 
-Phase numbers are indicative of first need, not a promise; a phase that
+Phase numbers are first-need per the definitive plan (Phases 0–9); a phase that
 discovers it doesn't need its crate doesn't create it.
 
 ## Dependency boundaries (the one rule that matters)
@@ -57,11 +57,12 @@ discovers it doesn't need its crate doesn't create it.
 Dependencies point **inward only**. Arrows mean "depends on":
 
 ```text
-polyvec-serve
-    └── polyvec-api          (Actix Web lives HERE — and only here)
-            └── polyvec-embed       (provider SDKs, HTTP clients)
-            └── polyvec-index       (index algorithms)
-            └── polyvec-store       (storage engine)
+polyvec-server
+    └── polyvec-retrieval       (tantivy lexical, hybrid fusion — Phase 5+)
+            └── polyvec-embeddings    (provider SDKs, HTTP clients — Phase 4+)
+            └── polyvec-ingestion    (canonical model, jobs — Phase 4+)
+            └── polyvec-index        (hnsw_rs ANN wrapper — Phase 2+)
+            └── polyvec-storage      (redb catalog — Phase 2+)
                     └── polyvec-core   (domain types, IDs, config, Error)
 ```
 

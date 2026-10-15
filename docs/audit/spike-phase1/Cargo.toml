@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/ann_compare",
+    "crates/store_redb",
+    "crates/lexical_tantivy",
+    "crates/convert_markit",
+]
+resolver = "2"
