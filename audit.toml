@@ -1,0 +1,21 @@
+# cargo-audit configuration — Polyvec.
+#
+# Run:  cargo audit          (needs cargo-audit installed; CI runs it)
+# cargo-audit works with zero config; this file pins the advisory DB source
+# and keeps an explicit place for ignored advisories (none yet).
+#
+# NOTE: this config has not yet been validated against a cargo-audit binary
+# (install was attempted; if CI flags a schema mismatch, fix here first).
+
+[database]
+path = "~/.cargo/advisory-dbs"
+url = "https://github.com/rustsec/advisory-db"
+fetch = true
+stale = false
+
+[advisories]
+ignore = []
+
+[output]
+format = "terminal"
+quiet = false

@@ -39,8 +39,19 @@ Owner: Roger (SRogDev). Discussion language: Spanish. Implementation plans for c
 - Status: early research phase on Rust pieces/algorithms (see STATUS.md).
 
 ## Repo map
-- Repo scaffold created 2026-09-26; layout to be defined as research concludes.
-- Commands: `cargo build` / `cargo test` / `cargo clippy`
+- Cargo workspace (root `Cargo.toml`): `[workspace]` + shared deps + shared lints
+  (`unsafe` forbidden, `missing_docs` warn, Clippy all+pedantic).
+- `crates/polyvec-core/` — the only crate so far: domain types, IDs, config
+  contracts, shared `Error` (thiserror). Other crates are created by the phase
+  that first needs them — no empty placeholders (see ARCHITECTURE.md).
+- `deny.toml` / `audit.toml` — license policy (MIT/Apache-2.0 only) + audit config.
+- `docs/decisions/` — ADRs; `docs/audit/` — crate & license audit reports.
+- Commands: `cargo build --workspace` / `cargo test --workspace` /
+  `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` /
+  `cargo deny check` / `cargo audit`
+- Rust toolchain: `export PATH="$HOME/.cargo/bin:$PATH"` (rustc 1.98.1).
+- `.github/workflows/ci.yml` exists locally but is NOT committed (stored token
+  lacks `workflows` scope); commit it with a full-scope token later.
 
 ## What NOT to do
 - No speculative abstractions, "just in case" features, or parallel systems.

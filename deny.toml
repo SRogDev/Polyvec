@@ -1,0 +1,62 @@
+# cargo-deny configuration — Polyvec license & security policy.
+#
+# Dependency policy (see docs/decisions/ADR-003-dual-mit-apache-license.md):
+#   * ONLY MIT and Apache-2.0 licensed dependencies are allowed.
+#   * Copyleft licenses are denied (would conflict with dual MIT/Apache-2.0).
+#
+# Run:  cargo deny check        (needs cargo-deny installed; CI runs it)
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# NOTE: validated against cargo-deny 0.20.2 (2026-10-15) — all checks green.
+
+[graph]
+targets = []
+all-features = false
+
+[advisories]
+db-path = "~/.cargo/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Explicit allow-list: the ONLY licenses accepted in this workspace.
+# Anything not listed here is denied — including all copyleft licenses.
+# (Dependency policy, see docs/decisions/ADR-003-dual-mit-apache-license.md.)
+# NOTE: validated against cargo-deny 0.20.2 — the old `unlicensed`,
+# `copyleft`, `allow-osi-fsf-free`, and `deny` keys were removed upstream;
+# the allow-list below is the entire enforcement mechanism (anything not
+# listed, including all copyleft licenses, is rejected).
+allow = ["MIT", "Apache-2.0"]
+confidence-threshold = 0.8
+# Per-crate exceptions (the mechanism for anything outside the allow-list).
+# Each one must be justifiable as: permissive, OSI-approved, non-copyleft.
+exceptions = [
+    # unicode-ident is a transitive dep of thiserror's proc-macro stack
+    # (thiserror-impl → syn → quote → proc-macro2 → unicode-ident).
+    # Unicode-3.0 covers its Unicode data tables; it is permissive,
+    # OSI-approved, and non-copyleft. Unavoidable in any thiserror-based tree.
+    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+]
+include-dev = true
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "any"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
