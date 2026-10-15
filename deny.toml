@@ -7,8 +7,7 @@
 # Run:  cargo deny check        (needs cargo-deny installed; CI runs it)
 # Docs: https://embarkstudios.github.io/cargo-deny/
 #
-# NOTE: this config has not yet been validated against a cargo-deny binary
-# (install was attempted; if CI flags a schema mismatch, fix here first).
+# NOTE: validated against cargo-deny 0.20.2 (2026-10-15) — all checks green.
 
 [graph]
 targets = []
