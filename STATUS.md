@@ -3,31 +3,38 @@
 > Single source of truth for where this project stands. Last updated: 2026-10-15.
 > Read this before starting work. Update it in the same PR when reality changes.
 
-## Done
-- 2026-09-26 — Repo created (SRogDev/Polyvec).
-- 2026-09-26 — Research started on Rust pieces/algorithms for the vector DB.
-- 2026-10-15 — Research phase concluded; definitive 23-section implementation
-  plan (Phases 0–9) approved and execution authorized.
-- 2026-10-15 — **Phase 0 done** (PR #3, squash-merged `85542c4`): Cargo
-  workspace + `polyvec-core` (`Error` type, 4 tests) + licenses +
-  ARCHITECTURE/BENCHMARKS/SaaS + 3 ADRs + `deny.toml`/`audit.toml`.
-  `.github/workflows/ci.yml` written but kept local-only (token lacks
-  `workflows` scope).
-- 2026-10-15 — **Phase 1 done**: crate audit complete (`docs/audit/`).
-  **Adopted:** hnsw_rs 0.3.5 (ANN core), redb 4.4.0 (catalog/metadata),
-  tantivy 0.26.2 (lexical). **Adapt:** markit (vendored, converter adapter).
-  **Reference only:** zvec-rs (TESTED ANN incorrectness for cosine/IP +
-  reopen-insert panic — rejected), Qdrant (mandated reference).
-  Prototype evidence in `docs/audit/spike-phase1/` (recall@10 0.97 hnsw_rs vs
-  0.016 zvec-rs-cosine, measured). License audit: no copyleft in 340-package
-  tree; coordinator decision — explicitly-reviewed permissive licenses
-  (Zlib/ISC/BSD/Unlicense) allowed via documented `deny.toml` exceptions,
-  copyleft banned (reversible by Roger).
-
 ## In progress / blocked
-- (none — Phase 3 dispatch next)
+- Phase 3 PR open (`phase-3-server-api`): server + public API implementation
+  complete, awaiting review/merge. Do NOT merge — coordinator merges after
+  the acceptance gate.
 
 ## Done
+- 2026-10-15 — **Phase 3 done**: server and public API. New crate
+  `polyvec-server` (Actix Web 4.17.0 on Tokio 1.53.3, per ADR-001):
+  versioned `/v1` routes — collections CRUD + `/stats` + `/flush`,
+  vectors insert (single object or atomic batch) / top-k search
+  `{vector,k,ef?}` / get / update / delete (idempotent), documents
+  PUT-by-source (server-derived ids) / GET / DELETE (cascade) —
+  plus `GET /healthz` + `GET /readyz`. Structured JSON errors
+  `{error:{code,message,detail}}` mapped from `polyvec-core::Error`
+  (Validation/Config→400, NotFound→404, AlreadyExists→409,
+  Unsupported→501, Corrupt/Storage/Internal→500 with safe messages).
+  CPU isolation: all storage work in `web::block` (per-collection
+  `Mutex` never held across `.await`); lazy collection open; env config
+  (`POLYVEC_BIND` default `127.0.0.1:8080`, non-loopback refused without
+  `POLYVEC_ALLOW_NONLOCAL_BIND=1`); SIGTERM/SIGINT graceful shutdown
+  with per-collection flush. No auth in Phase 3 (documented).
+  Boundary-breaker audit (inspect-and-reason) recorded in `SECURITY.md`
+  with CONFIRMED/PLAUSIBLE/UNTESTED tiers. Supporting changes:
+  `CollectionStore::read_collection_config` (cheap listing; redb forbids
+  double-open), `put_document` counter fix on overwrite. Evidence:
+  88 tests pass workspace-wide (46 server: 44 API + 2 error-mapping),
+  clippy `-D warnings` clean, `cargo fmt --check` clean,
+  `cargo deny check` green (documented BSD-3-Clause/Unicode-3.0
+  exceptions for the actix-web tree; RUSTSEC-2026-0258 h2 ignore —
+  unreachable without TLS — documented), `docs/e2e.sh` 31/31 checks
+  green against a live binary incl. SIGTERM→restart durability proof.
+  `Cargo.lock` now committed (first binary ships).
 - 2026-10-15 — **Phase 2 done**: core domain + persistent vector database.
   New crates `polyvec-index` (hnsw_rs ANN wrapper, Polyvec-owned tombstones,
   exact-search baseline) and `polyvec-storage` (`CollectionStore`: redb
@@ -48,8 +55,27 @@
   tantivy→lru (exception needed at Phase 5 integration) — recorded in
   `docs/audit/license-audit.md`.
 - 2026-10-15 — **Phase 1 done**: crate audit complete (`docs/audit/`).
+  **Adopted:** hnsw_rs 0.3.5 (ANN core), redb 4.4.0 (catalog/metadata),
+  tantivy 0.26.2 (lexical). **Adapt:** markit (vendored, converter adapter).
+  **Reference only:** zvec-rs (TESTED ANN incorrectness for cosine/IP +
+  reopen-insert panic — rejected), Qdrant (mandated reference).
+  Prototype evidence in `docs/audit/spike-phase1/` (recall@10 0.97 hnsw_rs vs
+  0.016 zvec-rs-cosine, measured). License audit: no copyleft in 340-package
+  tree; coordinator decision — explicitly-reviewed permissive licenses
+  (Zlib/ISC/BSD/Unlicense) allowed via documented `deny.toml` exceptions,
+  copyleft banned (reversible by Roger).
+- 2026-10-15 — **Phase 0 done** (PR #3, squash-merged `85542c4`): Cargo
+  workspace + `polyvec-core` (`Error` type, 4 tests) + licenses +
+  ARCHITECTURE/BENCHMARKS/SaaS + 3 ADRs + `deny.toml`/`audit.toml`.
+  `.github/workflows/ci.yml` written but kept local-only (token lacks
+  `workflows` scope).
+- 2026-09-26 — Research phase concluded; definitive 23-section implementation
+  plan (Phases 0–9) approved and execution authorized.
+- 2026-09-26 — Research started on Rust pieces/algorithms for the vector DB.
+- 2026-09-26 — Repo created (SRogDev/Polyvec).
 
 ## Next
-- Phase 2 — core domain + persistent vector database: collections/documents/
-  vectors model, redb-backed catalog, hnsw_rs ANN integration with
-  Polyvec-owned tombstones, exact-search baseline, restart recovery.
+- Phase 4 — canonical model + ingestion pipeline: `polyvec-ingestion`
+  (canonical model, chunking, ingestion jobs, markit converter adapter) and
+  `polyvec-embeddings` (provider interface, adapters, batching, dimension
+  validation). Text-query-via-embedding endpoints land here, not before.
