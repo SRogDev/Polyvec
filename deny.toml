@@ -21,15 +21,28 @@ yanked = "warn"
 ignore = []
 
 [licenses]
-unlicensed = "deny"
 # Explicit allow-list: the ONLY licenses accepted in this workspace.
+# Anything not listed here is denied — including all copyleft licenses.
+# (Dependency policy, see docs/decisions/ADR-003-dual-mit-apache-license.md.)
+# NOTE: validated against cargo-deny 0.20.2 — the old `unlicensed`,
+# `copyleft`, `allow-osi-fsf-free`, and `deny` keys were removed upstream;
+# the allow-list below is the entire enforcement mechanism (anything not
+# listed, including all copyleft licenses, is rejected).
 allow = ["MIT", "Apache-2.0"]
-# Reject any copyleft license outright, even if OSI/FSF-approved.
-copyleft = "deny"
-allow-osi-fsf-free = "neither"
 confidence-threshold = 0.8
-exceptions = []
+# Per-crate exceptions (the mechanism for anything outside the allow-list).
+# Each one must be justifiable as: permissive, OSI-approved, non-copyleft.
+exceptions = [
+    # unicode-ident is a transitive dep of thiserror's proc-macro stack
+    # (thiserror-impl → syn → quote → proc-macro2 → unicode-ident).
+    # Unicode-3.0 covers its Unicode data tables; it is permissive,
+    # OSI-approved, and non-copyleft. Unavoidable in any thiserror-based tree.
+    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+]
 include-dev = true
+
+[licenses.private]
+ignore = false
 
 [bans]
 multiple-versions = "warn"
