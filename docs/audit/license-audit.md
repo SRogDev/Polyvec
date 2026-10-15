@@ -151,3 +151,14 @@ confirms the single chain `tantivy → lru → hashbrown → foldhash`.
 
 **No GPL/AGPL anywhere in the Phase 5 tree.** Verified via `cargo deny check`
 (green 2026-10-15).
+
+## Phase 6 results (2026-10-15)
+
+New dependencies: **none**. Phase 6 adds no crates to any `Cargo.toml` —
+the relation subsystem is built on `redb` (already in the tree), `serde` /
+`serde_json` (already in the tree), and the standard library. `cargo deny
+check` green 2026-10-15 (advisories/bans/licenses/sources), no new
+exceptions, no new transitive licenses.
+
+**No GPL/AGPL anywhere in the Phase 6 tree.** Verified via `cargo deny check`
+(green 2026-10-15).

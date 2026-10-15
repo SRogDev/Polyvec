@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use polyvec_core::{
     Chunk, CollectionConfig, CollectionId, CollectionLifecycle, ContentHash, DistanceMetric,
-    Document, DocumentId, HnswParams, IndexState, Metadata, MetadataFilter, MetadataValue,
-    ModelTag, Provenance, RetrievalMode, RetrievalPath, ScoreKind, VectorId,
+    Document, DocumentId, ExpandConfig, HnswParams, IndexState, Metadata, MetadataFilter,
+    MetadataValue, ModelTag, Provenance, Relation, RelationType, RetrievalMode, RetrievalPath,
+    ScoreKind, VectorId,
 };
 use polyvec_storage::{Stats, StoredVector};
 use serde::{Deserialize, Serialize};
@@ -720,6 +721,11 @@ pub struct QueryRequestDto {
     /// RRF `k` for `hybrid` mode (default 60).
     #[serde(default)]
     pub rrf_k: Option<f64>,
+    /// Relationship expansion: run the base retrieval, then bounded BFS
+    /// over relations seeded from the base hits (see `docs/retrieval.md`).
+    /// Absent = Phase 5 behavior, unchanged.
+    #[serde(default)]
+    pub expand: Option<ExpandRequestDto>,
 }
 
 /// One retrieval hit — the common result schema across modes.
@@ -761,6 +767,10 @@ pub struct RetrievalHitDto {
     /// Document metadata as plain JSON (chunk hits only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, serde_json::Value>>,
+    /// Relationship evidence (hits added by `expand` only): the path of
+    /// relation types + hops from the nearest base hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<RelationEvidenceDto>,
 }
 
 /// `POST /v1/collections/{id}/query` response.
@@ -778,4 +788,150 @@ pub struct QueryResponseDto {
     /// Effective RRF `k` (`hybrid` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rrf_k: Option<f64>,
+    /// Effective expansion config (only when `expand` was requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expand: Option<ExpandEchoDto>,
+}
+
+// ---------------------------------------------------------------------------
+// relations (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/collections/{id}/relations` body.
+#[derive(Debug, Deserialize)]
+pub struct CreateRelationRequest {
+    /// Caller-chosen id (`[a-zA-Z0-9_-]`, 1–128 chars). When omitted the
+    /// server allocates `rel-{n:08}` from a durable counter.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Relation type: `"references"`, `"related_to"`, or `"supersedes"`.
+    #[serde(rename = "type")]
+    pub relation_type: String,
+    /// Source endpoint: a document or chunk id.
+    pub source: String,
+    /// Target endpoint: a document or chunk id.
+    pub target: String,
+    /// Provenance and annotations (flat string/number/boolean values).
+    /// Convention: `created_by` names who/what supplied the relation.
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// One relation on the wire.
+#[derive(Debug, Serialize)]
+pub struct RelationDto {
+    /// Stable relation id.
+    pub id: String,
+    /// Relation type.
+    #[serde(rename = "type")]
+    pub relation_type: RelationType,
+    /// Source endpoint (document or chunk id).
+    pub source: String,
+    /// Target endpoint (document or chunk id).
+    pub target: String,
+    /// Provenance and annotations.
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Unix seconds when the relation was recorded.
+    pub created_at: i64,
+}
+
+impl From<&Relation> for RelationDto {
+    fn from(rel: &Relation) -> Self {
+        Self {
+            id: rel.id.as_str().to_string(),
+            relation_type: rel.relation_type,
+            source: rel.source.clone(),
+            target: rel.target.clone(),
+            metadata: metadata_to_json(&rel.metadata),
+            created_at: rel.created_at,
+        }
+    }
+}
+
+/// `GET /v1/collections/{id}/relations` response.
+#[derive(Debug, Serialize)]
+pub struct RelationListResponse {
+    /// Relations in id order (deterministic across pages).
+    pub relations: Vec<RelationDto>,
+    /// Relations on this page.
+    pub count: usize,
+    /// Applied limit.
+    pub limit: usize,
+    /// Applied offset.
+    pub offset: usize,
+}
+
+/// The `expand` object on `POST /v1/collections/{id}/query`: bounded
+/// relationship expansion over the base hits.
+#[derive(Debug, Deserialize)]
+pub struct ExpandRequestDto {
+    /// Hops to walk from each base hit (1–5, default 3).
+    #[serde(default)]
+    pub depth: Option<u8>,
+    /// Cap on expanded nodes for the whole query (1–1000, default 100).
+    #[serde(default)]
+    pub max_nodes: Option<usize>,
+    /// Only walk these relation types (default: all).
+    #[serde(default)]
+    pub relation_types: Option<Vec<String>>,
+}
+
+impl ExpandRequestDto {
+    /// Validates into the domain config.
+    ///
+    /// # Errors
+    /// [`ApiError`] (`validation_error`) for an unknown relation type or
+    /// an out-of-range `depth` / `max_nodes`.
+    pub fn into_config(self) -> Result<ExpandConfig, crate::error::ApiError> {
+        let types = self
+            .relation_types
+            .map(|ts| {
+                ts.iter()
+                    .map(|t| t.parse::<RelationType>())
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(crate::error::ApiError::from)?;
+        ExpandConfig::new(self.depth, self.max_nodes, types).map_err(crate::error::ApiError::from)
+    }
+}
+
+/// Echo of the effective expansion config in the query response.
+#[derive(Debug, Serialize)]
+pub struct ExpandEchoDto {
+    /// Effective traversal depth.
+    pub depth: u8,
+    /// Effective node cap.
+    pub max_nodes: usize,
+}
+
+impl From<&ExpandConfig> for ExpandEchoDto {
+    fn from(cfg: &ExpandConfig) -> Self {
+        Self {
+            depth: cfg.depth,
+            max_nodes: cfg.max_nodes,
+        }
+    }
+}
+
+/// One hop of relationship evidence on an expanded hit.
+#[derive(Debug, Serialize)]
+pub struct RelationHopDto {
+    /// The relation walked.
+    pub relation_id: String,
+    /// The relation's type.
+    pub relation_type: RelationType,
+    /// `"outgoing"` (edge stored source → target, walked forward) or
+    /// `"incoming"` (walked backward).
+    pub direction: &'static str,
+}
+
+/// Evidence carried by hits added through `expand`: the path (relation
+/// types + hops) that led to the hit.
+#[derive(Debug, Serialize)]
+pub struct RelationEvidenceDto {
+    /// Number of hops from the nearest base hit.
+    pub hops: u32,
+    /// The evidence path, one entry per hop.
+    pub path: Vec<RelationHopDto>,
 }

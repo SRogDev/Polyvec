@@ -116,7 +116,7 @@ pub struct Stats {
 /// One collection's durable database: redb catalog + ANN index + recovery.
 pub struct CollectionStore {
     dir: PathBuf,
-    catalog: Catalog,
+    pub(crate) catalog: Catalog,
     config: CollectionConfig,
     index: AnnIndex,
     tombstones: TombstoneSet,
@@ -798,6 +798,15 @@ impl CollectionStore {
             }
             self.catalog.chunk_remove(&chunk.id)?;
         }
+        // Referential integrity: drop every relation touching the document
+        // or its chunks, in both directions. A deleted endpoint must never
+        // be reachable through the relation API or traversal again.
+        let mut endpoints: Vec<&str> = Vec::with_capacity(chunks.len() + 1);
+        endpoints.push(id.as_str());
+        for chunk in &chunks {
+            endpoints.push(chunk.id.as_str());
+        }
+        self.remove_relations_of(&endpoints)?;
         self.catalog.document_remove(id)?;
         self.documents -= 1;
         self.chunks -= n_chunks;

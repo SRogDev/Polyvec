@@ -33,6 +33,7 @@ pub mod hash;
 pub mod ids;
 pub mod metadata;
 pub mod metric;
+pub mod relation;
 pub mod retrieval;
 pub mod state;
 pub mod vector;
@@ -44,7 +45,11 @@ pub use hash::ContentHash;
 pub use ids::{ChunkId, CollectionId, DocumentId, VectorId};
 pub use metadata::{Metadata, MetadataValue};
 pub use metric::DistanceMetric;
-pub use retrieval::{MetadataFilter, RetrievalMode, RetrievalPath, RrfConfig, ScoreKind};
+pub use relation::{Relation, RelationId, RelationType};
+pub use retrieval::{
+    DEFAULT_EXPAND_DEPTH, DEFAULT_EXPAND_MAX_NODES, ExpandConfig, MAX_EXPAND_DEPTH,
+    MAX_EXPAND_MAX_NODES, MetadataFilter, RetrievalMode, RetrievalPath, RrfConfig, ScoreKind,
+};
 pub use state::{CollectionLifecycle, INDEX_FORMAT_VERSION, IndexState, SyncStatus};
 pub use vector::Vector;
 

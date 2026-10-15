@@ -223,6 +223,42 @@ and retries re-ingest rather than skip, so the two views converge. The
 direct `PUT`/`DELETE /documents` endpoints maintain the lexical index in
 the same request. Full semantics: `docs/retrieval.md`.
 
+### Relation model and traversal bounds (Phase 6)
+
+Relations are catalog-like, provenance-bearing records — so redb is
+their home, next to the document catalog (not a separate store):
+
+- Tables: `relations` (`rel_id → Relation` JSON) plus `rel_by_source` /
+  `rel_by_target` secondary indexes with composite keys
+  `{endpoint}\0{relation_id}` (prefix scans serve incident-edge lookups
+  and cascade deletes). Every relation write maintains all three rows in
+  one redb transaction.
+- No catalog format-version bump: `Catalog::open` creates missing tables
+  idempotently, so pre-Phase-6 catalogs keep opening with no migration
+  step (the value encodings of existing tables are untouched).
+- The id counter (`next_relation_id` in `meta`) is durable — server
+  restarts never re-allocate a relation id.
+
+Consistency is **referential integrity** (chosen over recoverable
+consistency): endpoints must exist at creation; `delete_document` drops
+every relation touching the document or its chunks, in both directions,
+in the same operation path as the chunk/vector cascade (this covers the
+HTTP route and the ingestion runner — both funnel through
+`CollectionStore::delete_document`). There are no dangling relations by
+construction.
+
+Traversal (`polyvec-retrieval::relations::traverse`) is a pure function
+over a caller-supplied adjacency closure — no redb inside, unit-tested
+with in-memory graphs. Bounded BFS: visited set (cycle protection,
+shortest-path evidence), `depth ≤ 5` (default 3), `max_nodes ≤ 1000`
+(default 100) per query, fan-out cap 64 per node (deterministic
+`(type, id)`-ordered truncation), 2000 ms wall-clock backstop. Edges are
+walked in both directions with the direction recorded per hop; seeds are
+the base hits' chunk + document ids; reached nodes append after the base
+hits with `score_kind: "relationship"` and `evidence: {hops, path}`.
+No graph query language exists — bounded BFS only. Full semantics:
+`docs/retrieval.md`.
+
 ## Key design decisions (ADRs)
 
 - **ADR-001** — Actix Web over Axum for the HTTP layer (`docs/decisions/`).

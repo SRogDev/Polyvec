@@ -24,7 +24,7 @@ phase is done, execution is running):
 | 3 | Server and public API (Actix Web) | done (PR #4) |
 | 4 | Canonical model + ingestion pipeline | done |
 | 5 | Lexical and hybrid retrieval | done |
-| 6 | Integrated relationship retrieval | planned |
+| 6 | Integrated relationship retrieval | done |
 | 7 | Reliability, quality and performance | planned |
 | 8 | Documentation and AI-native DX | planned |
 | 9 | MVP release | planned |
@@ -40,7 +40,7 @@ crates/polyvec-storage/   # redb-backed CollectionStore: catalog, persistence la
 crates/polyvec-server/    # Actix Web HTTP API: /v1 routes, schemas, config, graceful shutdown
 crates/polyvec-ingestion/ # ingestion pipeline: converter, canonical model, chunking, jobs
 crates/polyvec-embeddings/ # embedding provider trait, stub + remote HTTP adapters
-crates/polyvec-retrieval/  # lexical (tantivy) + hybrid (RRF) retrieval
+crates/polyvec-retrieval/  # lexical (tantivy) + hybrid (RRF) + relationship-aware retrieval
 vendor/markit/            # vendored markit (pinned 4197c76a; HTTP stubbed, mimalloc removed)
 docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
@@ -106,6 +106,22 @@ scrub the index, so stale content never surfaces lexically; the index
 rebuilds from the catalog on every collection open. Exact-match metadata
 filters work identically in all three modes. Full semantics in
 `docs/retrieval.md`; live smoke test in `docs/e2e-retrieval.sh`.
+
+**Phase 6 in one paragraph:** relations are explicitly supplied, typed,
+directed edges between documents/chunks (`references`, `related_to`,
+`supersedes` — the fixed initial vocabulary), stored in redb next to the
+document catalog with provenance metadata and server-stamped `created_at`.
+`POST/GET/DELETE /v1/collections/{id}/relations[/{rel_id}]` manages them
+(referential integrity at creation; document delete cascades to relations
+in both directions, so no orphaned relations are retrievable). Any query
+mode accepts `expand`: base retrieval first, then bounded BFS
+(depth ≤ 5, ≤ 1000 nodes, 64 fan-out, 2000 ms backstop) seeded from the
+base hits, with reached nodes appended carrying `evidence`
+(`{hops, path:[{relation_type, direction, relation_id}]}`). The committed
+fixture proves the mechanism: three documents where only A mentions the
+query term, `A → B → C` — lexical alone returns A, lexical + `expand`
+returns A, B, C with exact evidence paths. Full semantics in
+`docs/retrieval.md`; live smoke test in `docs/e2e-relations.sh`.
 
 ## License
 
