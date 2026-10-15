@@ -8,8 +8,14 @@
 //! * `vectors` — vector id → [`VectorRecord`] (node id, values, chunk link,
 //!   hash, tombstone flag). Values live here (not just in the ANN dump) so
 //!   the index can always be rebuilt from the catalog.
+//! * `relations` — relation id → [`Relation`](polyvec_core::Relation)
+//!   (Phase 6).
+//! * `rel_by_source` / `rel_by_target` — composite key
+//!   `{endpoint}\0{relation_id}` → `""`: secondary indexes for
+//!   endpoint-incident lookups (both traversal directions) and cascade
+//!   deletes. Maintained in the same transaction as the `relations` row.
 //! * `meta` — `"format_version"`, `"generation"`, `"synced_generation"`,
-//!   `"next_node_id"`.
+//!   `"next_node_id"`, `"next_relation_id"`.
 //!
 //! Every mutation is one redb write transaction; uncommitted transactions
 //! roll back. The ANN dump files are a rebuildable cache over this data.
@@ -21,18 +27,26 @@ use serde::{Deserialize, Serialize};
 
 use polyvec_core::{
     Chunk, ChunkId, CollectionConfig, CollectionLifecycle, ContentHash, Document, DocumentId,
-    Error, Result, VectorId,
+    Error, Relation, RelationId, Result, VectorId,
 };
 
 use crate::layout::CATALOG_NAME;
 
 /// Catalog format version (bump when a table layout changes).
+///
+/// Phase 6 added the relation tables WITHOUT a bump: value encodings of
+/// all pre-existing tables are untouched, and [`Catalog::open`] creates
+/// missing tables idempotently — so pre-Phase-6 catalogs keep opening
+/// (no migration step, no data rewrite).
 pub(crate) const CATALOG_FORMAT_VERSION: u32 = 1;
 
 const T_COLLECTIONS: TableDefinition<&str, &str> = TableDefinition::new("collections");
 const T_DOCUMENTS: TableDefinition<&str, &str> = TableDefinition::new("documents");
 const T_CHUNKS: TableDefinition<&str, &str> = TableDefinition::new("chunks");
 const T_VECTORS: TableDefinition<&str, &str> = TableDefinition::new("vectors");
+const T_RELATIONS: TableDefinition<&str, &str> = TableDefinition::new("relations");
+const T_REL_BY_SOURCE: TableDefinition<&str, &str> = TableDefinition::new("rel_by_source");
+const T_REL_BY_TARGET: TableDefinition<&str, &str> = TableDefinition::new("rel_by_target");
 const T_META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
 const K_COLLECTION: &str = "collection";
@@ -40,6 +54,12 @@ const K_FORMAT_VERSION: &str = "format_version";
 const K_GENERATION: &str = "generation";
 const K_SYNCED_GENERATION: &str = "synced_generation";
 const K_NEXT_NODE_ID: &str = "next_node_id";
+const K_NEXT_RELATION_ID: &str = "next_relation_id";
+
+/// Separator inside composite relation-index keys. Endpoints are document
+/// or chunk ids and relation ids are `[a-zA-Z0-9_-]` — neither can contain
+/// NUL, so `{endpoint}\0{relation_id}` splits unambiguously.
+const IDX_SEP: char = '\0';
 
 /// The persisted collection row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,6 +115,9 @@ impl Catalog {
             let _ = txn.open_table(T_DOCUMENTS).map_err(storage_err)?;
             let _ = txn.open_table(T_CHUNKS).map_err(storage_err)?;
             let _ = txn.open_table(T_VECTORS).map_err(storage_err)?;
+            let _ = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+            let _ = txn.open_table(T_REL_BY_SOURCE).map_err(storage_err)?;
+            let _ = txn.open_table(T_REL_BY_TARGET).map_err(storage_err)?;
             let mut meta = txn.open_table(T_META).map_err(storage_err)?;
             meta.insert(
                 K_FORMAT_VERSION,
@@ -104,12 +127,17 @@ impl Catalog {
             meta.insert(K_GENERATION, "0").map_err(storage_err)?;
             meta.insert(K_SYNCED_GENERATION, "0").map_err(storage_err)?;
             meta.insert(K_NEXT_NODE_ID, "0").map_err(storage_err)?;
+            meta.insert(K_NEXT_RELATION_ID, "1").map_err(storage_err)?;
         }
         txn.commit().map_err(storage_err)?;
         Ok(catalog)
     }
 
     /// Opens an existing catalog.
+    ///
+    /// Pre-Phase-6 catalogs lack the relation tables: they are created
+    /// idempotently here (one write transaction), so old catalogs keep
+    /// opening with no format-version bump and no data rewrite.
     ///
     /// # Errors
     /// [`Error::Storage`] if the file is missing or unreadable.
@@ -121,7 +149,20 @@ impl Catalog {
             });
         }
         let db = Database::open(&path).map_err(storage_err)?;
-        Ok(Self { db })
+        let catalog = Self { db };
+        let txn = catalog.db.begin_write().map_err(storage_err)?;
+        {
+            let _ = txn.open_table(T_COLLECTIONS).map_err(storage_err)?;
+            let _ = txn.open_table(T_DOCUMENTS).map_err(storage_err)?;
+            let _ = txn.open_table(T_CHUNKS).map_err(storage_err)?;
+            let _ = txn.open_table(T_VECTORS).map_err(storage_err)?;
+            let _ = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+            let _ = txn.open_table(T_REL_BY_SOURCE).map_err(storage_err)?;
+            let _ = txn.open_table(T_REL_BY_TARGET).map_err(storage_err)?;
+            let _ = txn.open_table(T_META).map_err(storage_err)?;
+        }
+        txn.commit().map_err(storage_err)?;
+        Ok(catalog)
     }
 
     /// Reads a metadata value.
@@ -533,11 +574,179 @@ impl Catalog {
         Ok(node_ids)
     }
 
+    // ------------------------------------------------------------------
+    // relations (Phase 6)
+    // ------------------------------------------------------------------
+
+    /// Whether `endpoint` names an existing document or chunk (raw string
+    /// lookup — endpoints are stored as plain ids, not typed wrappers).
+    pub(crate) fn endpoint_exists(&self, endpoint: &str) -> Result<bool> {
+        let txn = self.db.begin_read().map_err(storage_err)?;
+        let documents = txn.open_table(T_DOCUMENTS).map_err(storage_err)?;
+        if documents.get(endpoint).map_err(storage_err)?.is_some() {
+            return Ok(true);
+        }
+        let chunks = txn.open_table(T_CHUNKS).map_err(storage_err)?;
+        Ok(chunks.get(endpoint).map_err(storage_err)?.is_some())
+    }
+
+    /// Allocates the next relation counter value, atomically.
+    pub(crate) fn next_relation_id(&self) -> Result<u64> {
+        let txn = self.db.begin_write().map_err(storage_err)?;
+        let next = {
+            let mut meta = txn.open_table(T_META).map_err(storage_err)?;
+            let next: u64 = meta
+                .get(K_NEXT_RELATION_ID)
+                .map_err(storage_err)?
+                .and_then(|g| g.value().parse::<u64>().ok())
+                .unwrap_or(1);
+            meta.insert(K_NEXT_RELATION_ID, (next + 1).to_string().as_str())
+                .map_err(storage_err)?;
+            next
+        };
+        txn.commit().map_err(storage_err)?;
+        Ok(next)
+    }
+
+    fn encode_relation(rel: &Relation) -> Result<String> {
+        serde_json::to_string(rel).map_err(|e| Error::Storage {
+            detail: format!("encode relation: {e}"),
+        })
+    }
+
+    fn decode_relation(value: &str) -> Result<Relation> {
+        serde_json::from_str(value).map_err(|e| Error::Storage {
+            detail: format!("decode relation: {e}"),
+        })
+    }
+
+    fn index_key(endpoint: &str, id: &RelationId) -> String {
+        format!("{endpoint}{IDX_SEP}{id}")
+    }
+
+    /// Stores a relation plus both secondary-index rows, in one transaction.
+    pub(crate) fn relation_put(&self, rel: &Relation) -> Result<()> {
+        let json = Self::encode_relation(rel)?;
+        let txn = self.db.begin_write().map_err(storage_err)?;
+        {
+            let mut relations = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+            relations
+                .insert(rel.id.as_str(), json.as_str())
+                .map_err(storage_err)?;
+            drop(relations);
+            let mut by_source = txn.open_table(T_REL_BY_SOURCE).map_err(storage_err)?;
+            by_source
+                .insert(Self::index_key(&rel.source, &rel.id).as_str(), "")
+                .map_err(storage_err)?;
+            drop(by_source);
+            let mut by_target = txn.open_table(T_REL_BY_TARGET).map_err(storage_err)?;
+            by_target
+                .insert(Self::index_key(&rel.target, &rel.id).as_str(), "")
+                .map_err(storage_err)?;
+        }
+        txn.commit().map_err(storage_err)?;
+        Ok(())
+    }
+
+    /// Reads a relation by id.
+    pub(crate) fn relation_get(&self, id: &RelationId) -> Result<Option<Relation>> {
+        let txn = self.db.begin_read().map_err(storage_err)?;
+        let table = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+        table
+            .get(id.as_str())
+            .map_err(storage_err)?
+            .map(|g| Self::decode_relation(g.value()))
+            .transpose()
+    }
+
+    /// Removes a relation and its index rows. Returns `true` if it existed.
+    pub(crate) fn relation_remove(&self, id: &RelationId) -> Result<bool> {
+        let Some(rel) = self.relation_get(id)? else {
+            return Ok(false);
+        };
+        let txn = self.db.begin_write().map_err(storage_err)?;
+        {
+            let mut relations = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+            relations.remove(id.as_str()).map_err(storage_err)?;
+            drop(relations);
+            let mut by_source = txn.open_table(T_REL_BY_SOURCE).map_err(storage_err)?;
+            by_source
+                .remove(Self::index_key(&rel.source, id).as_str())
+                .map_err(storage_err)?;
+            drop(by_source);
+            let mut by_target = txn.open_table(T_REL_BY_TARGET).map_err(storage_err)?;
+            by_target
+                .remove(Self::index_key(&rel.target, id).as_str())
+                .map_err(storage_err)?;
+        }
+        txn.commit().map_err(storage_err)?;
+        Ok(true)
+    }
+
+    /// All relations, in id order (redb iterates keys lexicographically).
+    pub(crate) fn relations_all(&self) -> Result<Vec<Relation>> {
+        let txn = self.db.begin_read().map_err(storage_err)?;
+        let table = txn.open_table(T_RELATIONS).map_err(storage_err)?;
+        let mut out = Vec::new();
+        let mut iter = table.iter().map_err(storage_err)?;
+        for entry in iter.by_ref() {
+            let (_k, v) = entry.map_err(storage_err)?;
+            out.push(Self::decode_relation(v.value())?);
+        }
+        Ok(out)
+    }
+
+    /// Relations with `endpoint` as source (outgoing edges), in id order.
+    pub(crate) fn relations_by_source(&self, endpoint: &str) -> Result<Vec<Relation>> {
+        self.relations_by_endpoint(T_REL_BY_SOURCE, endpoint)
+    }
+
+    /// Relations with `endpoint` as target (incoming edges), in id order.
+    pub(crate) fn relations_by_target(&self, endpoint: &str) -> Result<Vec<Relation>> {
+        self.relations_by_endpoint(T_REL_BY_TARGET, endpoint)
+    }
+
+    fn relations_by_endpoint(
+        &self,
+        index: TableDefinition<&str, &str>,
+        endpoint: &str,
+    ) -> Result<Vec<Relation>> {
+        let prefix = format!("{endpoint}{IDX_SEP}");
+        let txn = self.db.begin_read().map_err(storage_err)?;
+        let table = txn.open_table(index).map_err(storage_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        let mut iter = table.iter().map_err(storage_err)?;
+        for entry in iter.by_ref() {
+            let (k, _) = entry.map_err(storage_err)?;
+            if let Some(rest) = k.value().strip_prefix(&prefix) {
+                ids.push(rest.to_string());
+            }
+        }
+        drop(iter);
+        drop(table);
+        drop(txn);
+        // ids arrive in key order (hence relation-id order); fetch each.
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            // The index row and the relation row are written in the same
+            // transaction, so a missing relation here is a bug, not a
+            // tolerated state — surface it loudly.
+            let rel = self
+                .relation_get(&RelationId::new(id).map_err(|e| Error::Storage {
+                    detail: format!("corrupt relation index key '{id}': {e}"),
+                })?)?
+                .ok_or_else(|| Error::Corrupt {
+                    detail: format!("relation index points at missing relation '{id}'"),
+                })?;
+            out.push(rel);
+        }
+        Ok(out)
+    }
+
     /// Reads the current generation / synced generation / next node id.
     pub(crate) fn generation(&self) -> Result<u64> {
         self.meta_u64(K_GENERATION)
     }
-
     /// Marks the catalog synced up to `generation`.
     pub(crate) fn mark_synced(&self, generation: u64) -> Result<()> {
         self.meta_set(K_SYNCED_GENERATION, &generation.to_string())

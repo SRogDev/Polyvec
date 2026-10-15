@@ -12,7 +12,74 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Metadata, MetadataValue, Result};
+use crate::{Error, Metadata, MetadataValue, RelationType, Result};
+
+/// Default traversal depth for `expand` (hops from a base hit).
+pub const DEFAULT_EXPAND_DEPTH: u8 = 3;
+/// Hard ceiling for traversal depth (per query).
+pub const MAX_EXPAND_DEPTH: u8 = 5;
+/// Default cap on expanded nodes per query.
+pub const DEFAULT_EXPAND_MAX_NODES: usize = 100;
+/// Hard ceiling for expanded nodes per query.
+pub const MAX_EXPAND_MAX_NODES: usize = 1000;
+
+/// Relationship-expansion config for the query endpoint.
+///
+/// Runs the base retrieval first, then a bounded BFS over the supplied
+/// relations seeded from the base hits' chunk/document ids, then appends
+/// the reached nodes as extra hits with path evidence (see
+/// `docs/retrieval.md`). Absent by default — Phase 5 queries behave
+/// exactly as before.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpandConfig {
+    /// How many relation hops to walk from each base hit (1–5, default 3).
+    pub depth: u8,
+    /// Cap on expanded nodes for the whole query (1–1000, default 100).
+    pub max_nodes: usize,
+    /// Only walk edges of these types; `None` walks every type.
+    pub relation_types: Option<Vec<RelationType>>,
+}
+
+impl ExpandConfig {
+    /// Builds a config, applying defaults and rejecting absurd values.
+    ///
+    /// # Errors
+    /// [`Error::Validation`] when `depth` is outside `1..=5` or
+    /// `max_nodes` is outside `1..=1000`.
+    pub fn new(
+        depth: Option<u8>,
+        max_nodes: Option<usize>,
+        relation_types: Option<Vec<RelationType>>,
+    ) -> Result<Self> {
+        let depth = depth.unwrap_or(DEFAULT_EXPAND_DEPTH);
+        if !(1..=MAX_EXPAND_DEPTH).contains(&depth) {
+            return Err(Error::Validation {
+                detail: format!("expand.depth must be within 1..={MAX_EXPAND_DEPTH}, got {depth}"),
+            });
+        }
+        let max_nodes = max_nodes.unwrap_or(DEFAULT_EXPAND_MAX_NODES);
+        if !(1..=MAX_EXPAND_MAX_NODES).contains(&max_nodes) {
+            return Err(Error::Validation {
+                detail: format!(
+                    "expand.max_nodes must be within 1..={MAX_EXPAND_MAX_NODES}, got {max_nodes}"
+                ),
+            });
+        }
+        Ok(Self {
+            depth,
+            max_nodes,
+            relation_types,
+        })
+    }
+
+    /// Whether an edge of this type is walkable under the config.
+    #[must_use]
+    pub fn allows(&self, relation_type: RelationType) -> bool {
+        self.relation_types
+            .as_ref()
+            .is_none_or(|types| types.contains(&relation_type))
+    }
+}
 
 /// Which retrieval subsystem(s) answer a query.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +125,10 @@ pub enum ScoreKind {
     /// Reciprocal Rank Fusion score, Σ 1/(k + rank). **Higher is better.**
     /// Not comparable across queries (depends on the fused lists).
     Rrf,
+    /// Relationship-expansion score: the number of relation hops from the
+    /// nearest base hit. **Lower is better** (fewer hops = closer).
+    /// Only appears on hits added by `expand`.
+    Relationship,
 }
 
 /// Which subsystem produced a hit — the retrieval-path explanation carried
@@ -69,6 +140,9 @@ pub enum RetrievalPath {
     Vector,
     /// The tantivy lexical index.
     Lexical,
+    /// The relation subsystem (bounded traversal over supplied relations).
+    /// Only appears on hits added by `expand`.
+    Relationship,
 }
 
 /// Tuning for Reciprocal Rank Fusion.
@@ -305,5 +379,46 @@ mod tests {
             serde_json::to_string(&RetrievalPath::Lexical).unwrap(),
             "\"lexical\""
         );
+        assert_eq!(
+            serde_json::to_string(&ScoreKind::Relationship).unwrap(),
+            "\"relationship\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RetrievalPath::Relationship).unwrap(),
+            "\"relationship\""
+        );
+        assert_eq!(
+            "relationship"
+                .parse::<RetrievalMode>()
+                .unwrap_err()
+                .to_string(),
+            "invalid value: unknown retrieval mode 'relationship'; expected 'vector', 'lexical', or 'hybrid'"
+        );
+    }
+
+    #[test]
+    fn expand_config_defaults() {
+        let cfg = ExpandConfig::new(None, None, None).unwrap();
+        assert_eq!(cfg.depth, 3);
+        assert_eq!(cfg.max_nodes, 100);
+        assert!(cfg.relation_types.is_none());
+        assert!(cfg.allows(RelationType::References));
+    }
+
+    #[test]
+    fn expand_config_rejects_absurd_values() {
+        assert!(ExpandConfig::new(Some(0), None, None).is_err());
+        assert!(ExpandConfig::new(Some(6), None, None).is_err());
+        assert!(ExpandConfig::new(None, Some(0), None).is_err());
+        assert!(ExpandConfig::new(None, Some(1001), None).is_err());
+        assert!(ExpandConfig::new(Some(1), Some(1), None).is_ok());
+        assert!(ExpandConfig::new(Some(5), Some(1000), None).is_ok());
+    }
+
+    #[test]
+    fn expand_config_type_filter() {
+        let cfg = ExpandConfig::new(None, None, Some(vec![RelationType::References])).unwrap();
+        assert!(cfg.allows(RelationType::References));
+        assert!(!cfg.allows(RelationType::Supersedes));
     }
 }
