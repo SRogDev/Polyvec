@@ -73,5 +73,14 @@ them entirely would mean forking around `tantivy`'s `lru` for zero legal gain.
 2. tantivy should be integrated with `default-features = false` (drops zstd/BSD
    and stemmers) unless zstd columnar compression is measured to matter — do the
    no-defaults build in Phase 2 and confirm the flag disappears.
+   - **Phase 2 result (2026-10-15, TESTED):** `tantivy 0.26.2` with
+     `default-features = false, features = ["mmap"]` compiles clean in a
+     scratch crate (4m 41s build, not committed as a dependency).
+     `zstd-safe`/`zstd-sys` (BSD-3-Clause) and `rust-stemmers` are **gone**
+     from the tree. `foldhash 0.2.0` (Zlib) **remains** via
+     `tantivy → lru → hashbrown → foldhash` — only avoidable if upstream
+     drops `lru`, so it will need a documented `deny.toml` exception when
+     tantivy is integrated (Phase 5), same class as the Phase 2 foldhash
+     exception via hnsw_rs.
 3. `subtle` (BSD-3-Clause, via markit's ureq): avoidable in Phase 4 by stubbing
    markit's HTTP fetch (Polyvec feeds bytes directly) — decide then.

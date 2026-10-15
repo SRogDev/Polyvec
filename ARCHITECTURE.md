@@ -16,13 +16,15 @@ not write throughput, not feature breadth.
 Polyvec/
 ├── Cargo.toml                  # [workspace]: members, pinned deps, shared lints
 ├── rustfmt.toml                # edition = "2024"
-├── deny.toml                   # license policy (MIT/Apache-2.0 only)
+├── deny.toml                   # license policy (MIT/Apache-2.0 + documented exceptions)
 ├── audit.toml                  # cargo-audit config
 ├── crates/
-│   └── polyvec-core/           # Phase 0. The ONLY crate so far.
+│   ├── polyvec-core/           # Phase 0. Domain vocabulary (see below).
+│   ├── polyvec-index/          # Phase 2. ANN index layer (see below).
+│   └── polyvec-storage/        # Phase 2. Durable storage layer (see below).
 ├── docs/
 │   ├── PROJECT_BRIEF.md        # full context handoff for another AI
-│   ├── decisions/              # ADRs (ADR-001, ADR-002, ADR-003, …)
+│   ├── decisions/              # ADRs (ADR-001 … ADR-004)
 │   ├── audit/                 # crate & license audit reports (Phase 1+)
 │   └── research/               # pre-plan landscape research
 ├── ARCHITECTURE.md             # this file
@@ -42,8 +44,8 @@ phase that first needs them (see "No empty placeholder crates" below).
 | Crate | Responsibility (plan §4) | First needed |
 | ----- | ------------------------ | ------------ |
 | `polyvec-core` | Domain vocabulary: types, validated IDs, config contracts, shared `Error` | Phase 0 (exists) |
-| `polyvec-index` | Vector index: hnsw_rs wrapper, Polyvec-owned tombstones, exact-search baseline | Phase 2 |
-| `polyvec-storage` | Durable catalog: redb-backed collections/documents/metadata, persistence, recovery | Phase 2 |
+| `polyvec-index` | Vector index: hnsw_rs wrapper, Polyvec-owned tombstones, exact-search baseline | Phase 2 (exists) |
+| `polyvec-storage` | Durable catalog: redb-backed collections/documents/metadata, persistence, recovery | Phase 2 (exists) |
 | `polyvec-server` | Actix Web routes, API schemas, config, graceful shutdown | Phase 3 |
 | `polyvec-ingestion` | Canonical model, chunking, ingestion jobs, converter adapter (markit) | Phase 4 |
 | `polyvec-embeddings` | Provider interface, adapters, batching, dimension validation | Phase 4 |
@@ -85,16 +87,46 @@ with zero behavior. Per the plan's "no abstraction without a concrete use
 case" principle, each crate is born in the PR that gives it its first real
 responsibility. `ARCHITECTURE.md` grows with the workspace.
 
+## Data flow (as of Phase 2)
+
+The first real flow exists — write path and read path through
+`CollectionStore` (sync Rust API; HTTP arrives in Phase 3):
+
+```text
+insert_vector(v)
+  │  1. validate (dimension, finiteness)          [polyvec-core]
+  │  2. redb txn: vector record + generation++    [polyvec-storage catalog]
+  └─ 3. hnsw insert (node id ← monotonic counter) [polyvec-index AnnIndex]
+
+search(query, k)
+  │  1. validate query                            [polyvec-core]
+  │  2. hnsw search(k + tombstones), post-filter  [polyvec-index]
+  └─ 3. node id → VectorId                        [polyvec-storage reverse map]
+
+delete_vector(id)
+  │  1. redb txn: tombstone flag + generation++   (durable immediately)
+  └─ 2. tombstone set insert                      (hidden from search at once)
+
+flush()
+  │  1. maybe rebuild()  (tombstones > 1/5 of live, ≥ 16)
+  │  2. dump index → temp files, rename into place
+  │  3. sidecar.json (SHA-256 checksums, generation)
+  └─ 4. redb txn: synced_generation = generation
+```
+
+One directory per collection: `catalog.redb`, `index.hnsw.{graph,data}`,
+`sidecar.json`. Recovery on open follows ADR-004 (rebuild from redb when
+the dump is missing/stale; `Error::Corrupt` — never a panic — on
+version/checksum mismatch).
+
 ## Key design decisions (ADRs)
 
 - **ADR-001** — Actix Web over Axum for the HTTP layer (`docs/decisions/`).
 - **ADR-002** — Modular monolith (one repo, many crates) over microservices
   or a single flat crate.
-- **ADR-003** — Dual MIT/Apache-2.0 licensing and the MIT/Apache-2.0-only
-  dependency policy it forces.
-
-## Data flow (as of Phase 0)
-
-There is no data flow yet — only the foundation. The first real flow
-(index build → segment write → read path) arrives with Phases 2–3 and will
-be documented here when it exists, not before.
+- **ADR-003** — Dual MIT/Apache-2.0 licensing and the dependency policy it
+  forces (MIT/Apache-2.0 preferred; explicitly-reviewed permissive licenses
+  via documented `deny.toml` exceptions; copyleft banned).
+- **ADR-004** — Storage commit protocol and consistency model (redb commits
+  first as source of truth; ANN dump is a checksummed, rebuildable cache;
+  honest recovery rules).

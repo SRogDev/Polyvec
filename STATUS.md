@@ -25,7 +25,29 @@
   copyleft banned (reversible by Roger).
 
 ## In progress / blocked
-- (none — Phase 2 dispatch next)
+- (none — Phase 3 dispatch next)
+
+## Done
+- 2026-10-15 — **Phase 2 done**: core domain + persistent vector database.
+  New crates `polyvec-index` (hnsw_rs ANN wrapper, Polyvec-owned tombstones,
+  exact-search baseline) and `polyvec-storage` (`CollectionStore`: redb
+  catalog, checksummed persistence layout, crash recovery). `polyvec-core`
+  grew the domain: validated IDs (Collection/Document/Chunk/Vector),
+  DistanceMetric (L2/cosine), CollectionConfig/HnswParams/ModelTag,
+  Document/Chunk/Metadata, ContentHash, IndexState. Rust API: create
+  collection, insert/search/update/delete vectors, documents/chunks with
+  cascade delete. Commit protocol + consistency model in
+  `docs/decisions/ADR-004-storage-commit-protocol.md` (redb commits first;
+  no fake cross-file atomicity). Evidence: 40 tests pass
+  (14 core + 11 index + 11 storage + 4 pre-existing); measured recall@10 =
+  1.0000 vs exact baseline (N=2000, dim=64, ef=200, cosine); restart,
+  interrupted-write, corrupt-dump, and tombstone-rebuild recovery tests
+  green. `cargo deny check` green (added documented Zlib exception for
+  foldhash via hnsw_rs→hashbrown). tantivy `default-features=false`:
+  compiles; zstd/BSD/stemmer flags gone, foldhash (Zlib) remains via
+  tantivy→lru (exception needed at Phase 5 integration) — recorded in
+  `docs/audit/license-audit.md`.
+- 2026-10-15 — **Phase 1 done**: crate audit complete (`docs/audit/`).
 
 ## Next
 - Phase 2 — core domain + persistent vector database: collections/documents/

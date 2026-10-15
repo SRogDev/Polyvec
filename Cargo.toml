@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/polyvec-core"]
+members = ["crates/polyvec-core", "crates/polyvec-index", "crates/polyvec-storage"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,13 @@ authors = ["SRogDev"]
 
 [workspace.dependencies]
 thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+hnsw_rs = "0.3.5"
+redb = "4.4.0"
+polyvec-core = { path = "crates/polyvec-core", version = "0.1.0" }
+polyvec-index = { path = "crates/polyvec-index", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
