@@ -616,12 +616,18 @@ impl CollectionStore {
                 });
             }
         }
+        let old_chunks = self.catalog.chunks_of(&doc.id)?.len() as u64;
+        let is_new = self.catalog.document_get(&doc.id)?.is_none();
         self.catalog.document_put(doc)?;
         for chunk in chunks {
             self.catalog.chunk_put(chunk)?;
         }
-        self.documents += 1;
-        self.chunks += chunks.len() as u64;
+        // Re-putting an existing document (new version) replaces its chunks;
+        // counters must reflect the replacement, not accumulate.
+        if is_new {
+            self.documents += 1;
+        }
+        self.chunks = self.chunks - old_chunks + chunks.len() as u64;
         Ok(())
     }
 
@@ -807,4 +813,24 @@ fn decide_open(
 /// the conversion is lossless.
 fn node_idx(node_id: u64) -> usize {
     usize::try_from(node_id).expect("node id exceeds address space")
+}
+
+/// Reads a collection's config without opening the full store.
+///
+/// Opens the redb catalog read-only and returns the stored
+/// [`CollectionConfig`] — the ANN index is never loaded, so this is the
+/// cheap way to enumerate collections (the HTTP server uses it for
+/// `GET /v1/collections`).
+///
+/// # Errors
+/// [`Error::NotFound`] if `dir` holds no collection;
+/// [`Error::Storage`] on I/O or decode failures.
+pub fn read_collection_config(dir: &Path) -> Result<CollectionConfig> {
+    let catalog = Catalog::open(dir)?;
+    catalog
+        .collection_get()?
+        .map(|record| record.config)
+        .ok_or_else(|| Error::NotFound {
+            what: format!("collection at {}", dir.display()),
+        })
 }

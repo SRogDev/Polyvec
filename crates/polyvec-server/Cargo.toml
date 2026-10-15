@@ -1,0 +1,40 @@
+[package]
+name = "polyvec-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Actix Web HTTP API over the Polyvec vector database engine"
+[lints]
+workspace = true
+
+[dependencies]
+actix-web = "4.17.0"
+tokio = { version = "1.53.3", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "time",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+polyvec-core = { workspace = true }
+polyvec-storage = { workspace = true }
+log = { workspace = true }
+env_logger = "0.11.8"
+
+[dev-dependencies]
+actix-web = { version = "4.17.0", features = ["macros"] }
+actix-http = "3"
+
+[[bin]]
+name = "polyvec-server"
+path = "src/bin/polyvec_server.rs"
+required-features = []
+
+[features]
+default = []

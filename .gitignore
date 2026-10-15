@@ -1,9 +1,8 @@
 # Rust build artifacts
 /target/
 
-# Cargo.lock is not committed for library-only workspaces.
-# Reconsider when the first binary/server crate ships (Phase 3+).
-/Cargo.lock
+# Cargo.lock IS committed now that the first binary ships (Phase 3+):
+# reproducible server builds matter more than a lean diff.
 
 # Environment files and local secrets — never commit
 .env

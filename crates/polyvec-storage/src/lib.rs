@@ -16,4 +16,6 @@ mod layout;
 mod store;
 
 pub use layout::{DUMP_BASENAME, SIDECAR_NAME, Sidecar};
-pub use store::{CollectionStore, Recovery, SearchHit, Stats, StoredVector};
+pub use store::{
+    CollectionStore, Recovery, SearchHit, Stats, StoredVector, read_collection_config,
+};

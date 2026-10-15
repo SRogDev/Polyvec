@@ -453,3 +453,58 @@ fn index_state_tracks_sync_status() {
     assert!(matches!(s.sync, SyncStatus::Clean));
     assert!(s.generation >= 1);
 }
+
+#[test]
+fn read_collection_config_without_opening_store() {
+    use polyvec_storage::read_collection_config;
+
+    let dir = tmp("readcfg");
+    let cfg = test_config(24);
+    let store = CollectionStore::create(&dir, cfg.clone());
+    assert!(store.is_ok());
+    drop(store);
+
+    // Reads the config without loading the ANN index.
+    let read = read_collection_config(&dir).unwrap();
+    assert_eq!(read.dimension, 24);
+    assert_eq!(read.name.as_str(), "kb");
+    assert_eq!(read, cfg);
+
+    // A directory that holds no collection is NotFound, not a panic.
+    let missing = tmp("readcfg-missing");
+    let err = read_collection_config(&missing.join("nope")).unwrap_err();
+    assert!(matches!(err, Error::NotFound { .. }), "got {err:?}");
+}
+
+#[test]
+fn put_document_overwrite_keeps_counters_honest() {
+    let dir = tmp("docoverwrite");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    let collection = CollectionId::new("kb").unwrap();
+    let doc_id = DocumentId::for_source(&collection, "src://a");
+
+    let put = |store: &mut CollectionStore, n_chunks: u32| {
+        let doc = Document::new(
+            doc_id.clone(),
+            collection.clone(),
+            "src://a".to_string(),
+            ContentHash::of(b"x"),
+            Metadata::new(),
+        );
+        let chunks: Vec<Chunk> = (0..n_chunks)
+            .map(|i| Chunk::new(doc_id.clone(), i, "text", 0, 4))
+            .collect();
+        store.put_document(&doc, &chunks).unwrap();
+    };
+
+    put(&mut store, 2);
+    let s = store.stats();
+    assert_eq!(s.documents, 1);
+    assert_eq!(s.chunks, 2);
+
+    // Re-putting the same document (new version) must not double-count.
+    put(&mut store, 3);
+    let s = store.stats();
+    assert_eq!(s.documents, 1, "documents counter inflated: {s:?}");
+    assert_eq!(s.chunks, 3, "chunks counter wrong: {s:?}");
+}

@@ -1,0 +1,136 @@
+# Polyvec HTTP API (Phase 3)
+
+Base URL: `http://127.0.0.1:8080`. All `/v1` paths return JSON.
+The server binds **localhost only** by default; see [Configuration](#configuration).
+
+Error responses always have this shape:
+
+```json
+{ "error": { "code": "not_found", "message": "not found: vector 'x'", "detail": null } }
+```
+
+| Code | Status | Meaning |
+| ---- | ------ | ------- |
+| `validation_error` | 400 | Bad value: dimension mismatch, non-finite floats, malformed id, bad `k`/`ef`, … |
+| `config_error` | 400 | Bad collection config: dimension 0, unknown metric, bad HNSW params |
+| `invalid_json` | 400 | Malformed JSON body |
+| `invalid_content_type` | 400 | Body is not `application/json` |
+| `not_found` | 404 | Unknown collection / vector / document |
+| `already_exists` | 409 | Collection or vector id already taken |
+| `payload_too_large` | 413 | Body exceeds `POLYVEC_JSON_LIMIT_BYTES` |
+| `unsupported` | 501 | Operation the engine cannot honor |
+| `corrupt` | 500 | Stored data failed an integrity check (safe message; details in server logs) |
+| `storage_error` | 500 | Storage failure (safe message; details in server logs) |
+| `internal_error` | 500 | Bug (safe message; details in server logs) |
+| `service_unavailable` | 503 | Data directory not accessible (`/readyz`) |
+
+## Health & readiness
+
+```bash
+curl localhost:8080/healthz   # {"status":"ok","service":"polyvec","version":"0.1.0"}
+curl localhost:8080/readyz    # {"status":"ready"} — 503 if the data dir is unusable
+```
+
+## Collections
+
+```bash
+# Create (201). metric: "l2" or "cosine". model/hnsw optional.
+curl -X POST localhost:8080/v1/collections \
+  -H 'content-type: application/json' \
+  -d '{"id":"kb-main","dimension":384,"metric":"cosine",
+       "model":{"name":"bge-m3","version":"1.0"},
+       "hnsw":{"m":16,"ef_construction":200,"ef_search":64,"max_elements":1000000}}'
+
+curl localhost:8080/v1/collections            # {"collections":[...],"count":1}
+curl localhost:8080/v1/collections/kb-main    # summary
+curl localhost:8080/v1/collections/kb-main/stats   # index state + counts
+curl -X POST localhost:8080/v1/collections/kb-main/flush  # checkpoint index to disk
+curl -X DELETE localhost:8080/v1/collections/kb-main      # 204, removes all data
+```
+
+Collection ids are slugs: `[a-z0-9-_]`, 1–64 chars. `dimension` is 1–4096.
+
+## Vectors
+
+```bash
+# Insert one (single object) or many ({"vectors":[...]} — atomic). 201.
+curl -X POST localhost:8080/v1/collections/kb-main/vectors \
+  -H 'content-type: application/json' \
+  -d '{"vectors":[
+        {"id":"vec-1","values":[0.1,0.2,0.3]},
+        {"id":"vec-2","values":[0.9,0.1,0.0]}]}'
+
+# Search: k = 1..1000, ef = 8..10000 (default: collection hnsw.ef_search).
+curl -X POST localhost:8080/v1/collections/kb-main/vectors/search \
+  -H 'content-type: application/json' \
+  -d '{"vector":[0.1,0.2,0.3],"k":10,"ef":64}'
+# {"hits":[{"id":"vec-1","distance":0.0},...],"k":10,"ef":64}
+
+curl localhost:8080/v1/collections/kb-main/vectors/vec-1   # {"id","values","chunk_id"}
+curl -X PUT localhost:8080/v1/collections/kb-main/vectors/vec-1 \
+  -H 'content-type: application/json' \
+  -d '{"values":[0.5,0.5,0.5]}'
+curl -X DELETE localhost:8080/v1/collections/kb-main/vectors/vec-1  # 204 (idempotent)
+```
+
+Vectors must match the collection dimension and be finite (no NaN/Inf).
+Duplicate ids are 409; unknown ids are 404.
+
+## Documents
+
+```bash
+# Upsert by `source` (idempotent re-ingestion key). 200.
+# The document id is derived: {collection}#{sha256}. Chunk ids are
+# {document}#c{index:06}; the server derives them from array position.
+curl -X PUT localhost:8080/v1/collections/kb-main/documents \
+  -H 'content-type: application/json' \
+  -d '{"source":"https://example.com/guide",
+       "metadata":{"author":"roger","pages":3},
+       "chunks":[{"text":"hello world","char_start":0,"char_end":11}]}'
+# {"id":"kb-main#a1b2...","version":1,"chunk_ids":[...]}
+
+# The id contains '#': percent-encode it in the path.
+curl 'localhost:8080/v1/collections/kb-main/documents/kb-main%23a1b2...'
+curl -X DELETE 'localhost:8080/v1/collections/kb-main/documents/kb-main%23a1b2...'  # 204, cascades
+```
+
+`content_hash` (64 hex chars) is optional; it defaults to the SHA-256 of the
+concatenated chunk texts. `metadata` accepts flat string/number/boolean
+values only. DELETE cascades to chunks and their vectors.
+
+## Not in this phase
+
+Text-query-via-embedding (`"query": "some text"` → embed → search) is
+**Phase 4** (`polyvec-embeddings` + `polyvec-ingestion`). It is deliberately
+not exposed here — there is no provider to embed with yet.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `POLYVEC_BIND` | `127.0.0.1:8080` | `IP:port` to listen on (`localhost` accepted as alias for `127.0.0.1`) |
+| `POLYVEC_DATA_DIR` | `./polyvec-data` | One sub-directory per collection; created on startup |
+| `POLYVEC_JSON_LIMIT_BYTES` | `16777216` (16 MiB) | Max JSON body; larger → `413` |
+| `POLYVEC_WORKERS` | (CPU count) | HTTP worker threads |
+| `POLYVEC_ALLOW_NONLOCAL_BIND` | unset | Set to `1` to allow a non-loopback bind |
+
+Binding a non-loopback address without `POLYVEC_ALLOW_NONLOCAL_BIND=1`
+refuses to start. **Phase 3 has no authentication** — anyone who can reach
+the socket has full read/write/delete. Keep it on localhost, or put it
+behind a reverse proxy / firewall you trust. See `SECURITY.md`.
+
+## Durability & shutdown
+
+- Every write commits to redb first: **durable immediately**, no flush needed.
+- Search sees writes at once (in-memory index); deletes hide immediately.
+- SIGTERM/SIGINT → finish in-flight requests → flush (checkpoint) every open
+  collection → exit. A `kill -9` loses nothing committed: the next open
+  rebuilds the index from redb (see `docs/decisions/ADR-004-*`).
+- `POST /v1/collections/{id}/flush` checkpoints on demand (useful before backups).
+
+## CPU isolation
+
+HNSW insert/search are CPU-bound. All storage work runs on Tokio's blocking
+thread pool (`web::block`); async request workers never block, so a heavy
+batch insert does not stall `/healthz` or other requests. The per-collection
+mutex is held only inside the blocking task, never across `.await`.

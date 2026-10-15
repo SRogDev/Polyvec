@@ -17,7 +17,16 @@ all-features = false
 db-path = "~/.cargo/advisory-dbs"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0258 (h2 0.3.27: unbounded empty DATA frames, low
+    # severity). actix-http 3.19.0 pins h2 ^0.3, so the patched 0.4.16 is
+    # not selectable. The vulnerable path is h2's HTTP/2 DATA-frame
+    # handling; Polyvec Phase 3 serves plaintext HTTP/1.1 only (no TLS, and
+    # actix-web negotiates HTTP/2 solely via ALPN under TLS), so it is
+    # unreachable in this deployment shape. Re-evaluate when TLS/HTTP-2 is
+    # added or actix-http moves to h2 0.4.
+    "RUSTSEC-2026-0258",
+]
 
 [licenses]
 # Explicit allow-list: the ONLY licenses accepted in this workspace.
@@ -44,6 +53,43 @@ exceptions = [
     # explicitly-reviewed permissive licenses via documented exceptions
     # (coordinator decision 2026-10-15, reversible by Roger).
     { allow = ["Zlib"], crate = "foldhash" },
+    # BSD-3-Clause stack pulled in by actix-web 4.17.0 (Phase 3). BSD-3-Clause
+    # is OSI-approved, permissive, non-copyleft, and in the pre-approved
+    # "BSD" category of the Phase 1 license audit (coordinator decision
+    # 2026-10-15, reversible by Roger). Grouped by subtree; versions are the
+    # Cargo.lock pins at the time of review (2026-10-15).
+    # brotli compression stack (actix-http → brotli):
+    { allow = ["BSD-3-Clause"], crate = "alloc-no-stdlib" },
+    { allow = ["BSD-3-Clause"], crate = "alloc-stdlib" },
+    { allow = ["BSD-3-Clause"], crate = "brotli" },
+    { allow = ["BSD-3-Clause"], crate = "brotli-decompressor" },
+    # zstd compression stack (actix-http → zstd):
+    { allow = ["BSD-3-Clause"], crate = "zstd" },
+    { allow = ["BSD-3-Clause"], crate = "zstd-safe" },
+    { allow = ["BSD-3-Clause"], crate = "zstd-sys" },
+    # charset handling (actix-web → encoding_rs):
+    { allow = ["BSD-3-Clause"], crate = "encoding_rs" },
+    # icu/zerovec unicode stack (actix-web → idna → icu_*): Unicode-3.0
+    # covers the Unicode data tables, like the pre-existing unicode-ident
+    # exception. Permissive, OSI-approved, non-copyleft.
+    { allow = ["Unicode-3.0"], crate = "icu_collections" },
+    { allow = ["Unicode-3.0"], crate = "icu_locale_core" },
+    { allow = ["Unicode-3.0"], crate = "icu_normalizer" },
+    { allow = ["Unicode-3.0"], crate = "icu_normalizer_data" },
+    { allow = ["Unicode-3.0"], crate = "icu_properties" },
+    { allow = ["Unicode-3.0"], crate = "icu_properties_data" },
+    { allow = ["Unicode-3.0"], crate = "icu_provider" },
+    { allow = ["Unicode-3.0"], crate = "litemap" },
+    { allow = ["Unicode-3.0"], crate = "potential_utf" },
+    { allow = ["Unicode-3.0"], crate = "tinystr" },
+    { allow = ["Unicode-3.0"], crate = "writeable" },
+    { allow = ["Unicode-3.0"], crate = "yoke" },
+    { allow = ["Unicode-3.0"], crate = "yoke-derive" },
+    { allow = ["Unicode-3.0"], crate = "zerofrom" },
+    { allow = ["Unicode-3.0"], crate = "zerofrom-derive" },
+    { allow = ["Unicode-3.0"], crate = "zerotrie" },
+    { allow = ["Unicode-3.0"], crate = "zerovec" },
+    { allow = ["Unicode-3.0"], crate = "zerovec-derive" },
 ]
 include-dev = true
 
