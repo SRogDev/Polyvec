@@ -769,8 +769,7 @@ fn concurrent_read_write_soak() {
                 match soak_step(&mut rng) % 4 {
                     0 => {
                         let id = 10_000 + t * 1_000 + i; // thread-unique
-                        if s
-                            .insert_vector(Vector::new(vid(id), unit_vec(id, 16), 16).unwrap())
+                        if s.insert_vector(Vector::new(vid(id), unit_vec(id, 16), 16).unwrap())
                             .is_ok()
                         {
                             inserts += 1;
@@ -828,7 +827,8 @@ fn concurrent_read_write_soak() {
     // count is exact — no lost updates, no phantom vectors.
     let expected_live = 64 + total_inserts - total_deletes;
     assert_eq!(
-        stats.live_vectors, expected_live,
+        stats.live_vectors,
+        expected_live,
         "live_vectors={} != 64 + {inserts} - {deletes}",
         stats.live_vectors,
         inserts = total_inserts,
