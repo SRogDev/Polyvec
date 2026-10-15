@@ -11,6 +11,14 @@
 //! | `POLYVEC_JSON_LIMIT_BYTES` | `16777216` (16 MiB) | Max JSON request body; larger bodies get `413`. |
 //! | `POLYVEC_WORKERS` | (actix default: CPU count) | Number of HTTP worker threads. |
 //! | `POLYVEC_ALLOW_NONLOCAL_BIND` | unset | Set to `1` to allow binding a non-loopback address. Phase 3 has **no authentication** — only set this behind a reverse proxy or firewall you trust. |
+//! | `POLYVEC_EMBEDDING_PROVIDER` | `none` | `none` (no provider — text ingest/query refused), `stub` (deterministic stub, dev/test only), `remote` (OpenAI-compatible HTTP endpoint). |
+//! | `POLYVEC_STUB_DIMENSION` | `64` | Stub provider dimension (1–4096). The collection dimension must match. |
+//! | `POLYVEC_JOB_QUEUE_CAPACITY` | `64` | Ingest job queue capacity. Submits past capacity get `429` with `Retry-After`. |
+//! | `POLYVEC_JOB_CONCURRENCY` | `4` | Ingest jobs executed concurrently. |
+//!
+//! The remote embedding provider reads its own variables — see
+//! `polyvec_embeddings::RemoteEmbeddingProvider` (`POLYVEC_EMBEDDING_BASE_URL`,
+//! `POLYVEC_EMBEDDING_API_KEY`, `POLYVEC_EMBEDDING_MODEL`, …).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -22,6 +30,29 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 pub const DEFAULT_DATA_DIR: &str = "./polyvec-data";
 /// Default maximum JSON body: 16 MiB (a 10k-vector batch at dim 384 is ~15 MiB JSON).
 pub const DEFAULT_JSON_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// Default stub provider dimension.
+pub const DEFAULT_STUB_DIMENSION: u32 = 64;
+/// Default ingest job queue capacity.
+pub const DEFAULT_JOB_QUEUE_CAPACITY: usize = 64;
+/// Default ingest job concurrency.
+pub const DEFAULT_JOB_CONCURRENCY: usize = 4;
+
+/// How text is embedded for ingestion and text queries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmbeddingKind {
+    /// No provider: text ingest/query without supplied vectors is refused
+    /// (`501`). The safe default — no hidden network calls.
+    None,
+    /// Deterministic stub provider for development and tests.
+    /// **Never use in production**: the vectors are a hash function, not
+    /// a semantic model.
+    Stub {
+        /// The stub's dimension; the collection dimension must match.
+        dimension: u32,
+    },
+    /// OpenAI-compatible remote endpoint (env-configured).
+    Remote,
+}
 
 /// Runtime configuration of the HTTP server.
 #[derive(Clone, Debug)]
@@ -36,6 +67,12 @@ pub struct ServerConfig {
     pub workers: Option<usize>,
     /// Whether a non-loopback bind was explicitly allowed.
     pub allow_nonlocal_bind: bool,
+    /// How text is embedded for ingestion and text queries.
+    pub embedding: EmbeddingKind,
+    /// Ingest job queue capacity (backpressure: submits past capacity get 429).
+    pub job_queue_capacity: usize,
+    /// Ingest jobs executed concurrently.
+    pub job_concurrency: usize,
 }
 
 impl ServerConfig {
@@ -96,12 +133,54 @@ impl ServerConfig {
             return Err("POLYVEC_WORKERS must be > 0".to_string());
         }
 
+        let embedding = match get("POLYVEC_EMBEDDING_PROVIDER").unwrap_or("none") {
+            "none" => EmbeddingKind::None,
+            "stub" => {
+                let dimension = get("POLYVEC_STUB_DIMENSION")
+                    .map(str::parse::<u32>)
+                    .transpose()
+                    .map_err(|_| "POLYVEC_STUB_DIMENSION must be a positive integer".to_string())?
+                    .unwrap_or(DEFAULT_STUB_DIMENSION);
+                if !(1..=4096).contains(&dimension) {
+                    return Err("POLYVEC_STUB_DIMENSION must be in 1..=4096".to_string());
+                }
+                EmbeddingKind::Stub { dimension }
+            }
+            "remote" => EmbeddingKind::Remote,
+            other => {
+                return Err(format!(
+                    "POLYVEC_EMBEDDING_PROVIDER={other:?} is not one of: none, stub, remote"
+                ));
+            }
+        };
+
+        let job_queue_capacity = get("POLYVEC_JOB_QUEUE_CAPACITY")
+            .map(str::parse::<usize>)
+            .transpose()
+            .map_err(|_| "POLYVEC_JOB_QUEUE_CAPACITY must be a positive integer".to_string())?
+            .unwrap_or(DEFAULT_JOB_QUEUE_CAPACITY);
+        if job_queue_capacity == 0 {
+            return Err("POLYVEC_JOB_QUEUE_CAPACITY must be > 0".to_string());
+        }
+
+        let job_concurrency = get("POLYVEC_JOB_CONCURRENCY")
+            .map(str::parse::<usize>)
+            .transpose()
+            .map_err(|_| "POLYVEC_JOB_CONCURRENCY must be a positive integer".to_string())?
+            .unwrap_or(DEFAULT_JOB_CONCURRENCY);
+        if job_concurrency == 0 {
+            return Err("POLYVEC_JOB_CONCURRENCY must be > 0".to_string());
+        }
+
         Ok(Self {
             bind,
             data_dir,
             json_limit,
             workers,
             allow_nonlocal_bind,
+            embedding,
+            job_queue_capacity,
+            job_concurrency,
         })
     }
 }

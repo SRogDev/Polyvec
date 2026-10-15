@@ -5,10 +5,13 @@
 
 use actix_web::test as awtest;
 use actix_web::{App, http::StatusCode, web};
-use polyvec_server::{AppState, ServerConfig, configure_routes};
+use polyvec_embeddings::StubEmbeddingProvider;
+use polyvec_server::{AppState, EmbeddingKind, ServerConfig, configure_routes};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Small JSON limit so the 413 path is cheap to exercise.
 const TEST_JSON_LIMIT: usize = 8 * 1024;
@@ -20,6 +23,9 @@ fn test_config(data_dir: PathBuf) -> ServerConfig {
         json_limit: TEST_JSON_LIMIT,
         workers: None,
         allow_nonlocal_bind: false,
+        embedding: EmbeddingKind::None,
+        job_queue_capacity: 16,
+        job_concurrency: 2,
     }
 }
 
@@ -49,7 +55,7 @@ async fn test_app_with_limit(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    let state = AppState::new(&test_config(data_dir));
+    let state = AppState::new(&test_config(data_dir)).expect("test app state");
     awtest::init_service(
         App::new()
             .app_data(web::Data::new(state))
@@ -112,10 +118,10 @@ async fn readyz_returns_ready_when_data_dir_exists() {
 
 #[actix_web::test]
 async fn readyz_is_503_when_data_dir_missing() {
-    let missing =
-        std::env::temp_dir().join(format!("polyvec-server-test-nope-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&missing);
-    let app = test_app(missing).await;
+    let dir = tmp_data_dir("readyz-gone");
+    let app = test_app(dir.clone()).await;
+    // The data dir vanishes after startup: readiness must report it.
+    std::fs::remove_dir_all(&dir).unwrap();
     let req = awtest::TestRequest::get().uri("/readyz").to_request();
     let resp = awtest::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1034,4 +1040,307 @@ async fn slow_insert_does_not_stall_healthz() {
         health_latency.as_secs() < 1,
         "healthz stalled by concurrent insert: {health_latency:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ingestion (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Test app with an explicit embedding provider.
+async fn test_app_with_provider(
+    data_dir: PathBuf,
+    provider: Option<Arc<dyn polyvec_embeddings::EmbeddingProvider>>,
+) -> impl actix_web::dev::Service<
+    actix_http::Request,
+    Response = actix_web::dev::ServiceResponse,
+    Error = actix_web::Error,
+> {
+    let state =
+        AppState::with_provider(&test_config(data_dir), provider).expect("test app state");
+    awtest::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(move |cfg| configure_routes(cfg, TEST_JSON_LIMIT)),
+    )
+    .await
+}
+
+fn stub_provider() -> Arc<dyn polyvec_embeddings::EmbeddingProvider> {
+    Arc::new(StubEmbeddingProvider::new(64).expect("stub provider"))
+}
+
+/// Polls `GET /v1/jobs/{id}` until the job is terminal.
+async fn wait_job_done(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    job_id: &str,
+) -> Value {
+    let start = std::time::Instant::now();
+    loop {
+        let req = awtest::TestRequest::get()
+            .uri(&format!("/v1/jobs/{job_id}"))
+            .to_request();
+        let resp = awtest::call_service(app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK, "get job {job_id}");
+        let body: Value = awtest::read_body_json(resp).await;
+        let state = body["state"].as_str().unwrap();
+        if state == "done" || state == "failed" {
+            return body;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "job {job_id} stuck in {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn submit_ingest(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    collection: &str,
+    payload: Value,
+) -> (StatusCode, Value) {
+    let req = awtest::TestRequest::post()
+        .uri(&format!("/v1/collections/{collection}/ingest"))
+        .set_json(payload)
+        .to_request();
+    let resp = awtest::call_service(app, req).await;
+    let status = resp.status();
+    let body: Value = awtest::read_body_json(resp).await;
+    (status, body)
+}
+
+#[actix_web::test]
+async fn ingest_and_query_end_to_end() {
+    let dir = tmp_data_dir("ingest-e2e");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    // 1. Ingest HTML bytes (base64) → 202 with a job id.
+    let html = "<html><body><h1>Rust guide</h1><p>Ownership, borrowing, lifetimes.</p></body></html>";
+    let payload = json!({
+        "source": "https://example.com/rust",
+        "filename": "rust.html",
+        "mime": "text/html",
+        "content": {"base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, html)},
+        "metadata": {"topic": "rust"},
+    });
+    let (status, body) = submit_ingest(&app, "kb", payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    let job_id = body["job_id"].as_str().expect("job_id").to_string();
+    assert_eq!(body["state"], "pending");
+
+    // 2. Poll until done; the job converted HTML → markdown → chunks → vectors.
+    let job = wait_job_done(&app, &job_id).await;
+    assert_eq!(job["state"], "done", "error: {}", job["error"]);
+    assert_eq!(job["affected"]["version"], 1);
+    assert_eq!(job["affected"]["skipped"], false);
+    assert!(job["affected"]["chunks"].as_u64().unwrap() > 0);
+
+    // 3. Text query finds it (stub provider embeds the query).
+    let req = awtest::TestRequest::post()
+        .uri("/v1/collections/kb/query")
+        .set_json(json!({"text": "rust ownership borrowing", "k": 5}))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert!(!body["hits"].as_array().unwrap().is_empty(), "body: {body}");
+    assert!(body["hits"][0]["chunk_id"].is_string());
+
+    // 4. Re-ingest unchanged content → done + skipped, no duplicate version.
+    let payload = json!({
+        "source": "https://example.com/rust",
+        "filename": "rust.html",
+        "mime": "text/html",
+        "content": {"base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, html)},
+    });
+    let (status, body) = submit_ingest(&app, "kb", payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job = wait_job_done(&app, body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done");
+    assert_eq!(job["affected"]["skipped"], true);
+    assert_eq!(job["affected"]["version"], 1);
+
+    // 5. Update with changed content → version 2.
+    let html2 = "<html><body><h1>Rust guide</h1><p>Ownership, borrowing, lifetimes, async.</p></body></html>";
+    let payload = json!({
+        "source": "https://example.com/rust",
+        "filename": "rust.html",
+        "mime": "text/html",
+        "content": {"base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, html2)},
+    });
+    let (status, body) = submit_ingest(&app, "kb", payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job = wait_job_done(&app, body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done");
+    assert_eq!(job["affected"]["version"], 2);
+    assert_eq!(job["affected"]["skipped"], false);
+    let document_id = job["affected"]["document_id"].as_str().unwrap().to_string();
+
+    // 6. Job listing shows the jobs.
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections/kb/jobs?limit=10")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert!(body["count"].as_u64().unwrap() >= 3, "body: {body}");
+
+    // 7. Delete the document → its vectors are tombstoned: the text query
+    //    finds nothing. (`#` is URL-encoded: it would start a fragment.)
+    let encoded_id = document_id.replace('#', "%23");
+    let req = awtest::TestRequest::delete()
+        .uri(&format!("/v1/collections/kb/documents/{encoded_id}"))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "delete {document_id}");
+    let req = awtest::TestRequest::post()
+        .uri("/v1/collections/kb/query")
+        .set_json(json!({"text": "rust ownership borrowing", "k": 5}))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert!(
+        body["hits"].as_array().unwrap().is_empty(),
+        "stale vectors still searchable: {body}"
+    );
+}
+
+#[actix_web::test]
+async fn query_without_provider_is_501() {
+    let dir = tmp_data_dir("query-501");
+    let app = test_app(dir).await;
+    create_collection(&app, "kb", 64).await;
+    let req = awtest::TestRequest::post()
+        .uri("/v1/collections/kb/query")
+        .set_json(json!({"text": "hello", "k": 5}))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert_eq!(error_code(&body), "unsupported");
+}
+
+#[actix_web::test]
+async fn ingest_without_provider_or_vectors_is_501() {
+    let dir = tmp_data_dir("ingest-501");
+    let app = test_app(dir).await;
+    create_collection(&app, "kb", 64).await;
+    let (status, body) = submit_ingest(
+        &app,
+        "kb",
+        json!({
+            "source": "https://example.com/x",
+            "content": {"text": "hello"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "body: {body}");
+    assert_eq!(error_code(&body), "unsupported");
+}
+
+#[actix_web::test]
+async fn ingest_supplied_vectors_needs_no_provider() {
+    // Supplied vectors bypass the provider entirely.
+    let dir = tmp_data_dir("ingest-supplied");
+    let app = test_app(dir).await;
+    create_collection(&app, "kb", 4).await;
+    let (status, body) = submit_ingest(
+        &app,
+        "kb",
+        json!({
+            "source": "doc-1",
+            "filename": "a.txt",
+            "mime": "text/plain",
+            "content": {"text": "hello world"},
+            "vectors": [[0.1, 0.2, 0.3, 0.4]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    let job = wait_job_done(&app, body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "error: {}", job["error"]);
+    assert_eq!(job["affected"]["vectors"], 1);
+}
+
+#[actix_web::test]
+async fn ingest_unknown_collection_is_404() {
+    let dir = tmp_data_dir("ingest-404");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    let (status, body) = submit_ingest(
+        &app,
+        "nope",
+        json!({
+            "source": "https://example.com/x",
+            "content": {"text": "hello"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(error_code(&body), "not_found");
+}
+
+#[actix_web::test]
+async fn get_unknown_job_is_404() {
+    let dir = tmp_data_dir("job-404");
+    let app = test_app(dir).await;
+    let req = awtest::TestRequest::get()
+        .uri("/v1/jobs/job-99999999")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert_eq!(error_code(&body), "not_found");
+}
+
+#[actix_web::test]
+async fn ingest_rejects_bad_content() {
+    let dir = tmp_data_dir("ingest-400");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    // Empty source.
+    let (status, _) = submit_ingest(
+        &app,
+        "kb",
+        json!({"source": "  ", "content": {"text": "x"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Bad base64.
+    let (status, body) = submit_ingest(
+        &app,
+        "kb",
+        json!({"source": "s", "content": {"base64": "!!!not-base64!!!"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    // Both text and base64.
+    let (status, _) = submit_ingest(
+        &app,
+        "kb",
+        json!({"source": "s", "content": {"text": "x", "base64": "eA=="}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Empty content.
+    let (status, _) = submit_ingest(
+        &app,
+        "kb",
+        json!({"source": "s", "content": {"text": ""}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

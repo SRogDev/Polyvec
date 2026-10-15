@@ -22,10 +22,10 @@ use crate::registry::{SharedStore, lock_store};
 use crate::schemas::{
     CollectionStatsResponse, CollectionSummary, CreateCollectionRequest, DocumentResponse,
     DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse,
-    ListCollectionsResponse, ReadyResponse, SearchHitDto, SearchRequest, SearchResponse, StatsDto,
-    UpdateVectorRequest, VectorItemDto, VectorResponse, VectorsUpsertRequest,
-    VectorsUpsertResponse, chunks_from, collection_config_from, content_hash_from,
-    metadata_from_json, parse_path_id,
+    IngestRequestDto, IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryHitDto, QueryRequestDto, QueryResponseDto,
+    ReadyResponse, SearchHitDto, SearchRequest, SearchResponse, StatsDto, UpdateVectorRequest,
+    VectorItemDto, VectorResponse, VectorsUpsertRequest, VectorsUpsertResponse, chunks_from,
+    collection_config_from, content_hash_from, metadata_from_json, parse_path_id,
 };
 use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF};
 
@@ -459,6 +459,181 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, json_limit: usize) {
             .route(
                 "/collections/{id}/documents/{document_id}",
                 web::delete().to(delete_document),
-            ),
+            )
+            .route("/collections/{id}/ingest", web::post().to(ingest_collection))
+            .route("/collections/{id}/jobs", web::get().to(list_jobs))
+            .route("/collections/{id}/query", web::post().to(query_text))
+            .route("/jobs/{job_id}", web::get().to(get_job)),
     );
+}
+
+// ---------------------------------------------------------------------------
+// ingestion jobs
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/collections/{id}/ingest` — submits an ingest job.
+///
+/// Returns `202 Accepted` with the job id; the pipeline runs in the
+/// background. `404` for unknown collections, `429` (+ `Retry-After`) when
+/// the job queue is full, `501` when text ingest needs an embedding
+/// provider but none is configured.
+async fn ingest_collection(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<IngestRequestDto>,
+) -> Result<impl Responder, ApiError> {
+    let collection_id = collection_id(path.into_inner().as_str())?;
+    let dto = body.into_inner();
+    if dto.source.trim().is_empty() {
+        return Err(ApiError::validation("source must not be empty"));
+    }
+    let content = dto.content.into_bytes()?;
+    if content.is_empty() {
+        return Err(ApiError::validation("content must not be empty"));
+    }
+    let metadata = metadata_from_json(&dto.metadata)?;
+    // Fail fast: text ingest without a provider and without supplied
+    // vectors can never succeed — refuse with 501 rather than queueing a
+    // doomed job.
+    if dto.vectors.is_none() && state.provider.is_none() {
+        return Err(ApiError::new(
+            actix_web::http::StatusCode::NOT_IMPLEMENTED,
+            "unsupported",
+            "no embedding provider configured: set POLYVEC_EMBEDDING_PROVIDER=stub|remote, or supply vectors",
+        ));
+    }
+
+    let runner = state.runner.clone();
+    let registry = Arc::clone(&state.registry);
+    let req = polyvec_ingestion::IngestRequest {
+        collection: collection_id.clone(),
+        source: dto.source,
+        filename: dto.filename,
+        mime: dto.mime,
+        content,
+        metadata,
+        vectors: dto.vectors,
+        idempotency_key: dto.idempotency_key,
+        max_attempts: None,
+    };
+    // The collection must exist (404 here, not a failed job); the submit
+    // itself is a quick redb transaction. Both run in `web::block`.
+    let job_id = web::block(move || {
+        registry.get_or_open(&collection_id).map_err(ApiError::from)?;
+        runner.try_submit_ingest(req).map_err(ApiError::from)
+    })
+    .await?
+    .map_err(|e: ApiError| e)?;
+    Ok(HttpResponse::Accepted().json(IngestResponseDto {
+        job_id: job_id.to_string(),
+        state: "pending".to_string(),
+    }))
+}
+
+/// `GET /v1/jobs/{job_id}` — inspects one job's state and error detail.
+async fn get_job(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<impl Responder, ApiError> {
+    let raw = path.into_inner();
+    if raw.trim().is_empty() {
+        return Err(ApiError::validation("job id must not be empty"));
+    }
+    let job_id = polyvec_ingestion::JobId::new(raw.clone());
+    let runner = state.runner.clone();
+    let job = web::block(move || runner.get_job(&job_id).map_err(ApiError::from))
+        .await?
+        .map_err(|e: ApiError| e)?;
+    match job {
+        Some(job) => Ok(HttpResponse::Ok().json(JobDto::from_job(&job))),
+        None => Err(ApiError::new(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "not_found",
+            format!("not found: job '{raw}'"),
+        )),
+    }
+}
+
+/// Query params for `GET /v1/collections/{id}/jobs`.
+#[derive(Debug, serde::Deserialize)]
+struct JobsQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /v1/collections/{id}/jobs` — lists recent jobs for a collection.
+async fn list_jobs(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<JobsQuery>,
+) -> Result<impl Responder, ApiError> {
+    let collection_id = collection_id(path.into_inner().as_str())?;
+    let limit = query.limit.unwrap_or(100).min(1000);
+    let runner = state.runner.clone();
+    let jobs = web::block(move || {
+        runner
+            .list_jobs(&collection_id, limit)
+            .map_err(ApiError::from)
+    })
+    .await?
+    .map_err(|e: ApiError| e)?;
+    let dtos: Vec<JobDto> = jobs.iter().map(JobDto::from_job).collect();
+    Ok(HttpResponse::Ok().json(JobListResponse {
+        count: dtos.len(),
+        jobs: dtos,
+    }))
+}
+
+/// `POST /v1/collections/{id}/query` — embeds text with the configured
+/// provider and searches. `501` when no provider is configured (text query
+/// has no supplied-vector path).
+async fn query_text(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<QueryRequestDto>,
+) -> Result<impl Responder, ApiError> {
+    let collection_id = collection_id(path.into_inner().as_str())?;
+    let dto = body.into_inner();
+    if dto.text.trim().is_empty() {
+        return Err(ApiError::validation("text must not be empty"));
+    }
+    if dto.k == 0 || dto.k > MAX_K {
+        return Err(ApiError::validation(format!(
+            "k must be in 1..={MAX_K}"
+        )));
+    }
+    let provider = state.provider.clone().ok_or_else(|| {
+        ApiError::new(
+            actix_web::http::StatusCode::NOT_IMPLEMENTED,
+            "unsupported",
+            "text query needs an embedding provider: set POLYVEC_EMBEDDING_PROVIDER=stub|remote",
+        )
+    })?;
+    // The remote adapter is blocking HTTP: embed on the blocking pool.
+    let text = dto.text.clone();
+    let mut vectors = web::block(move || provider.embed(&[text.as_str()]).map_err(ApiError::from))
+        .await?
+        .map_err(|e: ApiError| e)?;
+    let query_vector = vectors.pop().expect("embed returns one vector per text");
+    let ef = dto.ef.unwrap_or(0);
+    if ef != 0 && !(MIN_SEARCH_EF..=MAX_SEARCH_EF).contains(&ef) {
+        return Err(ApiError::validation(format!(
+            "ef must be in {MIN_SEARCH_EF}..={MAX_SEARCH_EF}"
+        )));
+    }
+    let k = dto.k;
+    let response = with_store(Arc::clone(&state.registry), collection_id, move |store| {
+        let ef = if ef == 0 { store.config().hnsw.ef_search } else { ef };
+        let hits = store.search(&query_vector, k, ef)?;
+        let dtos = hits
+            .into_iter()
+            .map(|hit| QueryHitDto {
+                id: hit.vector_id.to_string(),
+                distance: hit.distance,
+                chunk_id: hit.vector_id.chunk_id().map(|c| c.to_string()),
+            })
+            .collect();
+        Ok(QueryResponseDto { hits: dtos, k, ef })
+    })
+    .await?;
+    Ok(HttpResponse::Ok().json(response))
 }

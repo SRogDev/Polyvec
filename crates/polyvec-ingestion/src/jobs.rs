@@ -41,6 +41,17 @@ pub enum JobOp {
     Delete,
 }
 
+impl JobOp {
+    /// Wire string for the job's operation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JobOp::Ingest => "ingest",
+            JobOp::Delete => "delete",
+        }
+    }
+}
+
 /// Where a job stands. Terminal states (`Done`, `Failed`) are final.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +74,18 @@ impl JobState {
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self, JobState::Done | JobState::Failed)
+    }
+
+    /// Wire string for the job's state.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JobState::Pending => "pending",
+            JobState::Running => "running",
+            JobState::Retrying => "retrying",
+            JobState::Done => "done",
+            JobState::Failed => "failed",
+        }
     }
 }
 
