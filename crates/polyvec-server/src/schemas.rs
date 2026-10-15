@@ -531,3 +531,200 @@ pub fn chunks_from(document_id: &DocumentId, dtos: &[ChunkDto]) -> Result<Vec<Ch
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// ingestion
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/collections/{id}/ingest` body.
+#[derive(Debug, Deserialize)]
+pub struct IngestRequestDto {
+    /// Durable source identity (URI, path, external key).
+    pub source: String,
+    /// Original filename, if known (drives format detection).
+    pub filename: Option<String>,
+    /// MIME type hint, if known.
+    pub mime: Option<String>,
+    /// The source bytes: exactly one of `text` (UTF-8) or `base64`.
+    pub content: IngestContentDto,
+    /// Flat JSON metadata (string/number/boolean values only), merged over
+    /// any existing document metadata on re-ingest.
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+    /// Client-supplied vectors, aligned 1:1 with chunks post-chunking.
+    /// When present, no embedding provider is needed.
+    pub vectors: Option<Vec<Vec<f32>>>,
+    /// Caller-supplied idempotency key; derived from the content when absent.
+    pub idempotency_key: Option<String>,
+}
+
+/// Source bytes for an ingest request: exactly one variant must be set.
+#[derive(Debug, Deserialize)]
+pub struct IngestContentDto {
+    /// UTF-8 text content.
+    pub text: Option<String>,
+    /// Base64-encoded bytes (for HTML, CSV, or any binary-ish source).
+    pub base64: Option<String>,
+}
+
+impl IngestContentDto {
+    /// Decodes to raw bytes, enforcing "exactly one of text/base64".
+    ///
+    /// # Errors
+    /// [`ApiError`] (400) when neither or both of `text`/`base64` are set,
+    /// or when `base64` is not valid base64.
+    pub fn into_bytes(self) -> Result<Vec<u8>, ApiError> {
+        match (self.text, self.base64) {
+            (Some(text), None) => Ok(text.into_bytes()),
+            (None, Some(encoded)) => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(&encoded)
+                    .map_err(|e| {
+                        ApiError::validation(format!("content.base64 is not valid base64: {e}"))
+                    })
+            }
+            _ => Err(ApiError::validation(
+                "content must set exactly one of 'text' or 'base64'",
+            )),
+        }
+    }
+}
+
+/// `POST /v1/collections/{id}/ingest` response (`202 Accepted`).
+#[derive(Debug, Serialize)]
+pub struct IngestResponseDto {
+    /// The accepted job's id (poll `GET /v1/jobs/{job_id}`).
+    pub job_id: String,
+    /// Always `"pending"` at submit time.
+    pub state: String,
+}
+
+/// One ingestion job (`GET /v1/jobs/{id}`, `GET /v1/collections/{id}/jobs`).
+#[derive(Debug, Serialize)]
+pub struct JobDto {
+    /// Job id.
+    pub job_id: String,
+    /// Owning collection.
+    pub collection: String,
+    /// Ingested source identity.
+    pub source: String,
+    /// `"ingest"` or `"delete"`.
+    pub op: String,
+    /// `"pending"`, `"running"`, `"retrying"`, `"done"`, or `"failed"`.
+    pub state: String,
+    /// Attempts used so far (1-based).
+    pub attempts: u32,
+    /// Attempt budget.
+    pub max_attempts: u32,
+    /// Creation time (unix seconds).
+    pub created_at_secs: u64,
+    /// Last update time (unix seconds).
+    pub updated_at_secs: u64,
+    /// Failure detail (set on `failed`, and while `retrying`).
+    pub error: Option<JobErrorDto>,
+    /// What the job changed (set on `done`).
+    pub affected: Option<JobAffectedDto>,
+}
+
+/// Error detail for a failed (or retrying) job.
+#[derive(Debug, Serialize)]
+pub struct JobErrorDto {
+    /// `"transient"` or `"permanent"`.
+    pub kind: String,
+    /// Human-readable cause (never carries secrets).
+    pub message: String,
+    /// Which attempt produced this error (1-based).
+    pub attempt: u32,
+}
+
+/// What a finished job changed.
+#[derive(Debug, Serialize)]
+pub struct JobAffectedDto {
+    /// Affected document id.
+    pub document_id: String,
+    /// Document version after the job (unchanged on skip).
+    pub version: u64,
+    /// Chunks written.
+    pub chunks: u64,
+    /// Vectors written.
+    pub vectors: u64,
+    /// True when the content was unchanged and nothing was written.
+    pub skipped: bool,
+}
+
+impl JobDto {
+    /// Projects an [`polyvec_ingestion::IngestionJob`] onto the wire.
+    #[must_use]
+    pub fn from_job(job: &polyvec_ingestion::IngestionJob) -> Self {
+        Self {
+            job_id: job.id.clone(),
+            collection: job.collection.as_str().to_string(),
+            source: job.source.clone(),
+            op: job.op.as_str().to_string(),
+            state: job.state.as_str().to_string(),
+            attempts: job.attempts,
+            max_attempts: job.max_attempts,
+            created_at_secs: job.created_at_secs,
+            updated_at_secs: job.updated_at_secs,
+            error: job.error.as_ref().map(|e| JobErrorDto {
+                kind: e.kind.clone(),
+                message: e.message.clone(),
+                attempt: e.attempt,
+            }),
+            affected: job.affected.as_ref().map(|a| JobAffectedDto {
+                document_id: a.document_id.clone(),
+                version: a.version,
+                chunks: a.chunks,
+                vectors: a.vectors,
+                skipped: a.skipped,
+            }),
+        }
+    }
+}
+
+/// `GET /v1/collections/{id}/jobs` response.
+#[derive(Debug, Serialize)]
+pub struct JobListResponse {
+    /// Jobs, newest first.
+    pub jobs: Vec<JobDto>,
+    /// Number of jobs returned.
+    pub count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// text query
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/collections/{id}/query` body.
+#[derive(Debug, Deserialize)]
+pub struct QueryRequestDto {
+    /// Text to embed with the configured provider, then search.
+    pub text: String,
+    /// Number of hits.
+    pub k: usize,
+    /// HNSW search width (default from the collection config).
+    pub ef: Option<usize>,
+}
+
+/// One text-query hit.
+#[derive(Debug, Serialize)]
+pub struct QueryHitDto {
+    /// Vector id.
+    pub id: String,
+    /// Distance to the query vector (lower is closer).
+    pub distance: f32,
+    /// Owning chunk id, when the vector came from an ingested chunk.
+    pub chunk_id: Option<String>,
+}
+
+/// `POST /v1/collections/{id}/query` response.
+#[derive(Debug, Serialize)]
+pub struct QueryResponseDto {
+    /// Hits ordered by increasing distance.
+    pub hits: Vec<QueryHitDto>,
+    /// Requested `k`.
+    pub k: usize,
+    /// Effective search width.
+    pub ef: usize,
+}

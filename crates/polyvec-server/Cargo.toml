@@ -22,14 +22,18 @@ tokio = { version = "1.53.3", features = [
 ] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.22"
 polyvec-core = { workspace = true }
 polyvec-storage = { workspace = true }
+polyvec-embeddings = { workspace = true }
+polyvec-ingestion = { workspace = true }
 log = { workspace = true }
 env_logger = "0.11.8"
 
 [dev-dependencies]
 actix-web = { version = "4.17.0", features = ["macros"] }
 actix-http = "3"
+polyvec-embeddings = { workspace = true }
 
 [[bin]]
 name = "polyvec-server"

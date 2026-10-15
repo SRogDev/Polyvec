@@ -49,14 +49,18 @@ async fn main() -> std::io::Result<()> {
         )
     })?;
 
-    let state = AppState::new(&config);
+    let state = AppState::new(&config).unwrap_or_else(|err| {
+        eprintln!("polyvec-server: cannot build state: {err}");
+        std::process::exit(2);
+    });
     let shutdown_state = state.clone();
+    let serve_state = state.clone();
     let json_limit = config.json_limit;
     let bind = config.bind;
 
     let mut server = HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(state.clone()))
+            .app_data(web::Data::new(serve_state.clone()))
             .wrap(Logger::default())
             .configure(|cfg| configure_routes(cfg, json_limit))
     });
@@ -75,8 +79,11 @@ async fn main() -> std::io::Result<()> {
 
     running.await?;
 
-    // Graceful shutdown: checkpoint every open collection. Writes are
-    // already durable via redb; this persists the ANN index dumps.
+    // Graceful shutdown: drain ingest jobs first (in-flight jobs finish;
+    // no new submissions), then checkpoint every open collection. Writes
+    // are already durable via redb; this persists the ANN index dumps.
+    log::info!("draining ingest jobs...");
+    state.runner.shutdown().await;
     let mut failed = 0;
     for (id, result) in shutdown_state.registry.flush_all() {
         match result {

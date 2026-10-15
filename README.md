@@ -22,7 +22,7 @@ phase is done, execution is running):
 | 1 | Crate audit + persistence/index prototype | done |
 | 2 | Core domain + persistent vector database | done |
 | 3 | Server and public API (Actix Web) | done (PR #4) |
-| 4 | Canonical model + ingestion pipeline | next |
+| 4 | Canonical model + ingestion pipeline | done |
 | 5 | Lexical and hybrid retrieval | planned |
 | 6 | Integrated relationship retrieval | planned |
 | 7 | Reliability, quality and performance | planned |
@@ -38,9 +38,13 @@ crates/polyvec-core/      # domain types, IDs, config contracts, shared Error
 crates/polyvec-index/     # hnsw_rs ANN wrapper, Polyvec-owned tombstones, exact-search baseline
 crates/polyvec-storage/   # redb-backed CollectionStore: catalog, persistence layout, recovery
 crates/polyvec-server/    # Actix Web HTTP API: /v1 routes, schemas, config, graceful shutdown
+crates/polyvec-ingestion/ # ingestion pipeline: converter, canonical model, chunking, jobs
+crates/polyvec-embeddings/ # embedding provider trait, stub + remote HTTP adapters
+vendor/markit/            # vendored markit (pinned 4197c76a; HTTP stubbed, mimalloc removed)
 docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
 docs/API.md               # HTTP API reference with curl examples
+docs/ingestion.md         # ingestion pipeline + cost-guard mechanisms
 ```
 
 **Phase 2 in one paragraph:** `CollectionStore::create/open` manages one
@@ -70,6 +74,22 @@ binds without explicit opt-in — **there is no authentication in Phase 3**
 (see `SECURITY.md`). Quickstart: `cargo run -p polyvec-server --bin polyvec-server`, then
 `curl localhost:8080/healthz`; full reference in `docs/API.md`, runnable
 smoke test in `docs/e2e.sh`.
+
+**Phase 4 in one paragraph:** `POST /v1/collections/{id}/ingest` accepts
+source bytes (`{text}` or `{base64}`) and returns `202 {job_id}`; the
+`JobRunner` executes convert (vendored markit → Markdown) → canonicalize
+(deterministic, original + canonical hashes) → change-detect (unchanged →
+skip; a `vectors_present` guard finishes partial writes instead of
+reporting them skipped) → chunk (section-aware, deterministic ids) →
+embed (supplied vectors or the configured provider, batched) → atomic
+store write (old version tombstoned, stale evidence unsearchable
+immediately). Jobs persist in `jobs.redb` (`pending → running → done |
+failed`, bounded retries with backoff honoring 429 `Retry-After`,
+transient/permanent classification, bounded queue → `429` backpressure).
+`POST /v1/collections/{id}/query {text, k}` embeds via the configured
+provider (`none|stub|remote`) and searches — `501` when unconfigured.
+Provider keys come from env only and never appear in logs or errors.
+See `docs/ingestion.md`.
 
 ## License
 

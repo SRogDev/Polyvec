@@ -4,11 +4,27 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 3 PR open (`phase-3-server-api`): server + public API implementation
-  complete, awaiting review/merge. Do NOT merge — coordinator merges after
-  the acceptance gate.
+- Phase 4 branch `phase-4-ingestion`: canonical model + ingestion
+  pipeline complete; coordinator acceptance gate PASSED (build, 150 tests,
+  clippy -D warnings, fmt, cargo deny, live e2e 8/8). Ready to merge.
 
 ## Done
+- 2026-10-15 — **Phase 4 done**: canonical model and ingestion pipeline.
+  New crates `polyvec-embeddings` (sync `EmbeddingProvider` trait with
+  transient/permanent classification; deterministic stub for dev/test;
+  remote OpenAI-compatible HTTP adapter with batching, timeout, and
+  `Retry-After` handling) and `polyvec-ingestion` (markit-backed
+  `Converter` trait; deterministic canonicalization; section-aware
+  chunker; `JobRunner` with persisted jobs, bounded retries, backpressure,
+  idempotency). Vendored `markit` (`rust/` @ `4197c76a`) as
+  `vendor/markit` with HTTP fetching stubbed and mimalloc removed.
+  Storage: atomic `ingest_document` + one-time model-tag stamping.
+  Server: `POST /ingest` → 202, `GET /jobs/{id}`, `GET /{id}/jobs`,
+  `POST /query` (501 when no provider); `Error::Provider` → 502.
+  Evidence: 150 tests pass workspace-wide, clippy `-D warnings` clean,
+  `cargo fmt --check` clean, `cargo deny check` green (new license
+  exceptions documented; MPL-2.0 flagged for review). Live e2e via HTTP
+  (ingest → query → skip → update → delete) green.
 - 2026-10-15 — **Phase 3 done**: server and public API. New crate
   `polyvec-server` (Actix Web 4.17.0 on Tokio 1.53.3, per ADR-001):
   versioned `/v1` routes — collections CRUD + `/stats` + `/flush`,

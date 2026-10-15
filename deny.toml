@@ -26,6 +26,12 @@ ignore = [
     # unreachable in this deployment shape. Re-evaluate when TLS/HTTP-2 is
     # added or actix-http moves to h2 0.4.
     "RUSTSEC-2026-0258",
+    # RUSTSEC-2024-0436 (paste 1.0.15: unmaintained, NOT a vulnerability).
+    # paste is a build-time proc-macro used by lofty (markit's audio
+    # metadata reader). It generates code at compile time; it ships no
+    # runtime code and has no known vulnerabilities. Unavoidable without
+    # patching the vendored markit to drop audio support.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]
@@ -90,6 +96,41 @@ exceptions = [
     { allow = ["Unicode-3.0"], crate = "zerotrie" },
     { allow = ["Unicode-3.0"], crate = "zerovec" },
     { allow = ["Unicode-3.0"], crate = "zerovec-derive" },
+    # --- Phase 4 additions (2026-10-15) ---
+    # reqwest/rustls TLS stack (polyvec-embeddings → reqwest). ISC is
+    # permissive, OSI-approved, non-copyleft — same class as MIT.
+    { allow = ["ISC"], crate = "rustls-webpki" },
+    { allow = ["ISC"], crate = "untrusted" },
+    # aws-lc-rs/aws-lc-sys (ISC): crypto provider for rustls-platform-verifier.
+    { allow = ["ISC"], crate = "aws-lc-rs" },
+    { allow = ["ISC", "Apache-2.0", "MIT", "BSD-3-Clause"], crate = "aws-lc-sys" },
+    # webpki-root-certs (CDLA-Permissive-2.0): Mozilla root certificates
+    # data. CDLA-Permissive is a permissive data license, OSI-approved.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    # subtle (BSD-3-Clause): constant-time ops via rustls ← reqwest.
+    # (The markit/ureq subtle chain was removed by the vendored stub;
+    # this is the rustls one, unavoidable with a TLS HTTP client.)
+    { allow = ["BSD-3-Clause"], crate = "subtle" },
+    # markit HTML stack (polyvec-ingestion → markit → scraper). ISC is
+    # permissive, OSI-approved, non-copyleft.
+    { allow = ["ISC"], crate = "scraper" },
+    { allow = ["ISC"], crate = "ego-tree" },
+    { allow = ["BSD-2-Clause"], crate = "mutate_once" },
+    # MPL-2.0 stack (cssparser/selectors via scraper): weak copyleft,
+    # FILE-scoped — it requires sharing modifications to those files only,
+    # and does not propagate to Polyvec. Unavoidable for HTML parsing via
+    # markit; flagged for Roger's review (reversible).
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    { allow = ["MPL-2.0"], crate = "selectors" },
+    # markit archive/image support: bzip2-1.0.6 (BSD-style permissive),
+    # CC0-1.0/MIT-0 (public domain), BSD-2-Clause, Zlib — all permissive,
+    # OSI-approved, non-copyleft.
+    { allow = ["bzip2-1.0.6"], crate = "libbz2-rs-sys" },
+    { allow = ["CC0-1.0", "MIT-0"], crate = "ppmd-rust" },
+    { allow = ["BSD-2-Clause"], crate = "kamadak-exif" },
+    { allow = ["Zlib"], crate = "zlib-rs" },
 ]
 include-dev = true
 
