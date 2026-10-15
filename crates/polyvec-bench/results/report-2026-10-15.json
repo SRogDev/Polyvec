@@ -1,7 +1,7 @@
 {
   "meta": {
     "date": "2026-10-15",
-    "git_sha": "626e215b28e0a9a27622d499ae5e336003f9ca79",
+    "git_sha": "1e8055271b329821a91ccdd00ab7d05ef41c11b8",
     "hardware": {
       "cpu_model": "AMD EPYC 9D25 126-Core Processor",
       "cpu_threads": 2,
@@ -15,21 +15,31 @@
     ]
   },
   "layer_a_vector_engine": {
+    "ram_per_vector": {
+      "bytes_per_vector": 5254.9632,
+      "rss_before_kib": 5376,
+      "rss_after_kib": 108012
+    },
+    "disk_per_vector": {
+      "bytes_per_vector": 2724.81555,
+      "total_bytes": 54496311,
+      "n": 20000
+    },
     "bulk_insert_10k_dim64": {
       "n": 10000,
       "dim": 64,
       "seed": 161,
-      "seconds": 11.429233693,
-      "vectors_per_sec": 874.9492983177555
+      "seconds": 22.467013577,
+      "vectors_per_sec": 445.0969847740347
     },
     "bulk_insert_50k_dim128": {
       "n": 50000,
       "dim": 128,
       "seed": 162,
-      "seconds": 181.549900564,
-      "vectors_per_sec": 275.40637502235364
+      "seconds": 221.15566748,
+      "vectors_per_sec": 226.0850945839844
     },
-    "flush_10k_sec": 0.054842523,
+    "flush_10k_sec": 0.062330706,
     "recall_at_10": {
       "n": 2000,
       "dim": 64,
@@ -46,30 +56,20 @@
       "k": 10,
       "ef": 200,
       "queries": 2000,
-      "qps_1_thread": 421.61707787716347,
-      "qps_8_threads": 429.735463488508,
+      "qps_1_thread": 507.2550362064264,
+      "qps_8_threads": 431.93417949927317,
       "note_8t": "8 threads share one Mutex<CollectionStore> — the server's per-collection lock shape; measures contention, not lock-free scaling"
     },
-    "ram_per_vector": {
-      "bytes_per_vector": 0.0,
-      "rss_before_kib": 367108,
-      "rss_after_kib": 367108
-    },
-    "disk_per_vector": {
-      "bytes_per_vector": 2724.8538,
-      "total_bytes": 54497076,
-      "n": 20000
-    },
     "update_delete_rebuild": {
-      "update_avg_us": 4208.858,
-      "delete_avg_us": 88.408,
-      "flush_after_1k_deletes_sec": 0.089864005,
-      "explicit_rebuild_19k_live_sec": 32.983986426
+      "update_avg_us": 3257.964,
+      "delete_avg_us": 92.776,
+      "flush_after_1k_deletes_sec": 10.971014497,
+      "explicit_rebuild_19k_live_sec": 13.403459746
     },
     "recovery_rebuild_on_open": {
-      "seconds": 33.753723686,
+      "seconds": 11.214100405,
       "recovery": "RebuiltFromCatalog { reason: \"no sidecar found\" }",
-      "live_vectors_after": 20000
+      "live_vectors_after": 10000
     }
   },
   "layer_b_knowledge_pipeline": {
@@ -77,42 +77,42 @@
       {
         "format": "markdown",
         "success": true,
-        "seconds": 0.000158178,
+        "seconds": 0.000128963,
         "markdown_chars": 668,
         "source_format": "md"
       },
       {
         "format": "plain text",
         "success": true,
-        "seconds": 4.246e-6,
+        "seconds": 5.378e-6,
         "markdown_chars": 351,
         "source_format": "txt"
       },
       {
         "format": "html",
         "success": true,
-        "seconds": 0.000455924,
+        "seconds": 0.000444607,
         "markdown_chars": 186,
         "source_format": "html"
       }
     ],
     "pipeline_per_doc": {
       "documents": 20,
-      "seconds_total": 0.014893493,
-      "seconds_per_doc": 0.0007446746500000001,
+      "seconds_total": 0.005857266,
+      "seconds_per_doc": 0.00029286329999999997,
       "stages": {
-        "convert_avg_ms": 0.1010605,
-        "canonicalize_avg_ms": 0.00758625,
-        "chunk_avg_ms": 0.01366335,
-        "embed_stub_avg_ms": 0.00450975,
-        "store_write_avg_ms": 0.6178548
+        "convert_avg_ms": 0.005955,
+        "canonicalize_avg_ms": 0.00560935,
+        "chunk_avg_ms": 0.0089024,
+        "embed_stub_avg_ms": 0.0025388,
+        "store_write_avg_ms": 0.26985775
       },
       "note": "excludes job queueing, lexical-index write, doc-record write (see runner measurements)"
     },
     "runner": {
       "ingest_job_per_doc": {
         "attempts": 1,
-        "seconds": 0.05244702,
+        "seconds": 0.050817947,
         "state": "Done",
         "affected": {
           "document_id": "kb#aa41ad7540656b28112cc4db",
@@ -123,7 +123,7 @@
         }
       },
       "reingest_skip": {
-        "seconds": 0.002261853,
+        "seconds": 0.001037937,
         "attempts": 1,
         "state": "Done",
         "affected": {
@@ -135,7 +135,7 @@
         }
       },
       "update_propagates": {
-        "seconds": 0.051937927,
+        "seconds": 0.052908182,
         "state": "Done",
         "affected": {
           "document_id": "kb#aa41ad7540656b28112cc4db",
@@ -146,7 +146,7 @@
         }
       },
       "delete_propagates": {
-        "seconds": 0.051452298,
+        "seconds": 0.053101592,
         "document_gone": true,
         "live_vectors_after": 0,
         "search_hits_after_delete": 0
@@ -154,13 +154,13 @@
       "retry_transient_then_success": {
         "scripted_transient_failures": 2,
         "attempts": 3,
-        "seconds": 3.071103782,
+        "seconds": 3.023630943,
         "state": "Done",
         "note": "attempts==3 and ~3s backoff (1s+2s) expected"
       },
       "retry_permanent_fails_fast": {
         "attempts": 1,
-        "seconds": 0.052079539,
+        "seconds": 0.050977906,
         "state": "Failed",
         "note": "attempts==1 expected: permanent errors are never retried"
       }
@@ -168,7 +168,7 @@
   },
   "layer_c_end_to_end": {
     "time_to_first_useful_result_sec": {
-      "seconds": 0.103891547,
+      "seconds": 0.102525798,
       "expected_chunk_rank_1": true
     },
     "self_query_retrieval": {
@@ -178,7 +178,7 @@
       "recall_at_5": 1.0,
       "ndcg_at_5": 1.0,
       "rank_1_count": 30,
-      "query_p50_ms": 0.776805,
+      "query_p50_ms": 0.758007,
       "evidence_violations": 0,
       "note": "queries are exact chunk texts; rank 1 expected by construction (stub provider is a hash). Mechanics check only."
     },
@@ -187,5 +187,5 @@
       "corpus_searchable_after_restart": true
     }
   },
-  "report_wall_seconds": 347.08553998
+  "report_wall_seconds": 371.386930258
 }
