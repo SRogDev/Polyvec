@@ -23,10 +23,14 @@ Polyvec/
 │   ├── polyvec-core/           # Phase 0. Domain vocabulary (see below).
 │   ├── polyvec-index/          # Phase 2. ANN index layer (see below).
 │   ├── polyvec-storage/        # Phase 2. Durable storage layer (see below).
-│   └── polyvec-server/         # Phase 3. Actix Web HTTP API (see below).
+│   ├── polyvec-server/         # Phase 3. Actix Web HTTP API (see below).
+│   ├── polyvec-ingestion/      # Phase 4. Canonical model, chunking, jobs.
+│   ├── polyvec-embeddings/     # Phase 4. Provider trait, stub + remote adapters.
+│   └── polyvec-retrieval/      # Phase 5. tantivy lexical index, RRF fusion.
 ├── docs/
 │   ├── PROJECT_BRIEF.md        # full context handoff for another AI
-│   ├── API.md                  # HTTP API reference + curl examples (Phase 3)
+│   ├── API.md                  # HTTP API reference + curl examples (Phase 5)
+│   ├── retrieval.md            # retrieval modes, scores, filters, failure behavior (Phase 5)
 │   ├── e2e.sh                  # runnable end-to-end smoke test (Phase 3)
 │   ├── decisions/              # ADRs (ADR-001 … ADR-004)
 │   ├── audit/                 # crate & license audit reports (Phase 1+)
@@ -53,7 +57,7 @@ phase that first needs them (see "No empty placeholder crates" below).
 | `polyvec-server` | Actix Web routes, API schemas, config, graceful shutdown | Phase 3 (exists) |
 | `polyvec-ingestion` | Canonical model, chunking, ingestion jobs, converter adapter (markit) | Phase 4 (exists) |
 | `polyvec-embeddings` | Provider interface, adapters, batching, dimension validation | Phase 4 (exists) |
-| `polyvec-retrieval` | Lexical (tantivy), hybrid fusion, result contract (Phase 5); bounded graph retrieval (Phase 6) | Phase 5 |
+| `polyvec-retrieval` | Lexical (tantivy), hybrid fusion, result contract (Phase 5); bounded graph retrieval (Phase 6) | Phase 5 (exists) |
 
 Phase numbers are first-need per the definitive plan (Phases 0–9); a phase that
 discovers it doesn't need its crate doesn't create it.
@@ -172,20 +176,52 @@ POST /v1/collections/{id}/ingest {source, content.{text|base64}, metadata?, vect
 `pending → running → done | failed` (+ `retrying`, bounded attempts with
 exponential backoff honoring 429 `Retry-After`). Transient (429/5xx/
 timeout) vs permanent (4xx/auth/dimension) classification — permanent is
-never retried. `POST /v1/collections/{id}/query {text, k}` embeds via the
-configured provider (`POLYVEC_EMBEDDING_PROVIDER=none|stub|remote`) then
-searches; 501 when unconfigured. Full reference: `docs/API.md`, `docs/ingestion.md`.
+never retried. `POST /v1/collections/{id}/query` answers in `vector`
+(default), `lexical`, or `hybrid` mode — see "Retrieval data flow
+(Phase 5)" below and `docs/retrieval.md`. Full reference: `docs/API.md`,
+`docs/ingestion.md`.
 
 `Registry` (in `polyvec-server`) holds `data_dir` +
-`Mutex<HashMap<CollectionId, Arc<Mutex<CollectionStore>>>>`. Collections
-open lazily on first use; `GET /v1/collections` lists from memory plus
-cheap catalog config reads (`read_collection_config` — no index load;
-redb forbids opening a database twice in one process, so open stores are
-never re-opened from disk). The binary (`polyvec-server`) parses env
-config, refuses non-loopback binds without explicit opt-in, and on
-SIGTERM/SIGINT finishes in-flight requests (`HttpServer::stop(true)`)
+`Mutex<HashMap<CollectionId, CollectionHandle>>`, where a
+`CollectionHandle` is the vector store plus the tantivy lexical index for
+one collection. Collections open lazily on first use; `GET /v1/collections`
+lists from memory plus cheap catalog config reads (`read_collection_config`
+— no index load; redb forbids opening a database twice in one process, so
+open stores are never re-opened from disk). The binary (`polyvec-server`)
+parses env config, refuses non-loopback binds without explicit opt-in, and
+on SIGTERM/SIGINT finishes in-flight requests (`HttpServer::stop(true)`)
 then flushes every open collection. Full endpoint reference:
 `docs/API.md`; threat model: `SECURITY.md`.
+
+### Retrieval data flow (Phase 5)
+
+```text
+POST /v1/collections/{id}/query {text, k, ef?, mode?, filter?, rrf_k?}
+  │  1. route + Json extract; mode parse (default "vector"),
+  │     filter/rrf_k validation                            [polyvec-server routes]
+  │  2. vector/hybrid: 501 when no provider; else embed on the
+  │     blocking pool (remote HTTP is blocking)            [polyvec-embeddings]
+  │  3. web::block → blocking pool, one CollectionHandle:
+  │       lexical ≠ vector: tantivy BM25 search(text, k, filter)
+  │                         (filters pushed into the query) [polyvec-retrieval]
+  │       vector ≠ lexical: HNSW search(k×4 when filtered, ef)
+  │                         → post-filter on document metadata,
+  │                         truncate to k                     [polyvec-index]
+  │       hybrid: RRF(k=60 default) over both rankings,
+  │               fused on chunk id, top-k kept        [polyvec-retrieval]
+  │       enrich: chunk text + source + metadata joined from
+  │               the catalog (stale hits skipped, never half-built)
+  └─ 4. common result schema: rank/id/score/score_kind/path +
+        chunk/document/vector ids, distance, source, text, metadata
+```
+
+The lexical index (`<collection>/lexical/`) is rebuilt from the catalog
+on every collection open — the catalog is the source of truth, tantivy is
+derived. Ingestion jobs index chunk text right after the vector write in
+the same job (`DocStore::index_lexical`); a lexical failure fails the job
+and retries re-ingest rather than skip, so the two views converge. The
+direct `PUT`/`DELETE /documents` endpoints maintain the lexical index in
+the same request. Full semantics: `docs/retrieval.md`.
 
 ## Key design decisions (ADRs)
 

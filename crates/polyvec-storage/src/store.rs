@@ -412,6 +412,31 @@ impl CollectionStore {
         Ok((doc, chunks))
     }
 
+    /// Reads a chunk by id. Returns `None` when unknown.
+    ///
+    /// Used by the retrieval layer to enrich hits with chunk text.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the catalog cannot be read.
+    pub fn get_chunk(&self, id: &ChunkId) -> Result<Option<Chunk>> {
+        self.catalog.chunk_get(id)
+    }
+
+    /// Every document with its chunks. Used to rebuild the lexical index
+    /// from the catalog on collection open (the catalog is the source of
+    /// truth; the tantivy index is derived).
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the catalog cannot be read.
+    pub fn all_documents(&self) -> Result<Vec<(Document, Vec<Chunk>)>> {
+        let mut out = Vec::new();
+        for doc in self.catalog.documents_all()? {
+            let chunks = self.catalog.chunks_of(&doc.id)?;
+            out.push((doc, chunks));
+        }
+        Ok(out)
+    }
+
     // ------------------------------------------------------------------
     // writes
     // ------------------------------------------------------------------

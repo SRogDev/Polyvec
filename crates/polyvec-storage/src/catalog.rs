@@ -239,6 +239,23 @@ impl Catalog {
         table.len().map_err(storage_err)
     }
 
+    /// All documents, in key order. Used by the lexical rebuild (the
+    /// catalog is the source of truth for the tantivy index).
+    pub(crate) fn documents_all(&self) -> Result<Vec<Document>> {
+        let txn = self.db.begin_read().map_err(storage_err)?;
+        let table = txn.open_table(T_DOCUMENTS).map_err(storage_err)?;
+        let mut out = Vec::new();
+        let mut iter = table.iter().map_err(storage_err)?;
+        for entry in iter.by_ref() {
+            let (_k, v) = entry.map_err(storage_err)?;
+            let doc: Document = serde_json::from_str(v.value()).map_err(|e| Error::Storage {
+                detail: format!("decode document: {e}"),
+            })?;
+            out.push(doc);
+        }
+        Ok(out)
+    }
+
     /// Stores a chunk (own transaction).
     pub(crate) fn chunk_put(&self, chunk: &Chunk) -> Result<()> {
         let json = serde_json::to_string(chunk).map_err(|e| Error::Storage {

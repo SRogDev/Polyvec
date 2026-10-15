@@ -13,7 +13,10 @@
 //! request bodies never are.
 
 use actix_web::{HttpResponse, Responder, web};
-use polyvec_core::{CollectionId, Document, DocumentId, Error as CoreError, Vector, VectorId};
+use polyvec_core::{
+    CollectionId, Document, DocumentId, Error as CoreError, RetrievalMode, RrfConfig, Vector,
+    VectorId,
+};
 use polyvec_storage::CollectionStore;
 use std::sync::Arc;
 
@@ -22,11 +25,10 @@ use crate::registry::{SharedStore, lock_store};
 use crate::schemas::{
     CollectionStatsResponse, CollectionSummary, CreateCollectionRequest, DocumentResponse,
     DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse, IngestRequestDto,
-    IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryHitDto,
-    QueryRequestDto, QueryResponseDto, ReadyResponse, SearchHitDto, SearchRequest, SearchResponse,
-    StatsDto, UpdateVectorRequest, VectorItemDto, VectorResponse, VectorsUpsertRequest,
-    VectorsUpsertResponse, chunks_from, collection_config_from, content_hash_from,
-    metadata_from_json, parse_path_id,
+    IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryRequestDto,
+    ReadyResponse, SearchHitDto, SearchRequest, SearchResponse, StatsDto, UpdateVectorRequest,
+    VectorItemDto, VectorResponse, VectorsUpsertRequest, VectorsUpsertResponse, chunks_from,
+    collection_config_from, content_hash_from, metadata_from_json, parse_path_id,
 };
 use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF};
 
@@ -57,6 +59,29 @@ where
     })
     .await?
     .map_err(ApiError::from)
+}
+
+/// Runs `f` on the blocking pool with the collection's handle (vector
+/// store + lexical index).
+///
+/// Same contract as [`with_store`]: the closure runs off the async
+/// workers, and the per-collection mutexes are locked only inside it —
+/// never across `.await`.
+async fn with_handle<T, F>(
+    registry: Arc<crate::registry::Registry>,
+    id: CollectionId,
+    f: F,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::registry::CollectionHandle) -> Result<T, CoreError> + Send + 'static,
+{
+    let handle = web::block(move || registry.get_or_open_handle(&id))
+        .await?
+        .map_err(ApiError::from)?;
+    web::block(move || f(&handle))
+        .await?
+        .map_err(ApiError::from)
 }
 
 /// Validates the `{id}` path segment as a collection slug.
@@ -359,7 +384,7 @@ async fn put_document(
     let label = collection_id.as_str().to_string();
     let n_chunks = chunks.len();
     let lookup_id = collection_id.clone();
-    let version = with_store(Arc::clone(&state.registry), lookup_id, move |store| {
+    let version = with_handle(Arc::clone(&state.registry), lookup_id, move |handle| {
         let doc = Document::new(
             document_id.clone(),
             collection_id.clone(),
@@ -367,7 +392,21 @@ async fn put_document(
             content_hash,
             metadata,
         );
-        store.put_document(&doc, &chunks)?;
+        {
+            let mut store = lock_store(&handle.store)?;
+            store.put_document(&doc, &chunks)?;
+        }
+        // The lexical view follows the catalog in the same request: chunk
+        // text is (re-)indexed under the document id.
+        {
+            let mut lexical = crate::registry::lock_lexical(&handle.lexical)?;
+            lexical.upsert_document(&polyvec_retrieval::LexicalDocument {
+                id: &doc.id,
+                metadata: &doc.metadata,
+                chunks: &chunks,
+            })?;
+        }
+        let store = lock_store(&handle.store)?;
         let (stored, _) = store.get_document(&document_id)?;
         Ok(stored.version)
     })
@@ -405,8 +444,15 @@ async fn delete_document(
     let (collection_raw, document_raw) = path.into_inner();
     let id = collection_id(&collection_raw)?;
     let document_id = parse_path_id::<DocumentId>(&document_raw, "document")?;
-    with_store(Arc::clone(&state.registry), id, move |store| {
-        store.delete_document(&document_id)?;
+    with_handle(Arc::clone(&state.registry), id, move |handle| {
+        {
+            let mut store = lock_store(&handle.store)?;
+            store.delete_document(&document_id)?;
+        }
+        // Scrub the lexical index in the same request: deleted content
+        // must not remain searchable by exact term.
+        let mut lexical = crate::registry::lock_lexical(&handle.lexical)?;
+        lexical.delete_document(&document_id)?;
         Ok(())
     })
     .await?;
@@ -589,9 +635,18 @@ async fn list_jobs(
     }))
 }
 
-/// `POST /v1/collections/{id}/query` — embeds text with the configured
-/// provider and searches. `501` when no provider is configured (text query
-/// has no supplied-vector path).
+/// `POST /v1/collections/{id}/query` — retrieval in `vector` (default),
+/// `lexical`, or `hybrid` mode.
+///
+/// * `vector`: embeds the text with the configured provider, then ANN
+///   search (the Phase 4 behavior). `501` when no provider is configured.
+/// * `lexical`: BM25 over chunk text via the tantivy index. Needs no
+///   embedding provider.
+/// * `hybrid`: Reciprocal Rank Fusion of the vector and lexical rankings.
+///   Needs the provider (for the vector side).
+///
+/// A failing subsystem fails the whole query — never a silent fallback.
+/// Full semantics in `docs/retrieval.md`.
 async fn query_text(
     state: web::Data<AppState>,
     path: web::Path<String>,
@@ -605,42 +660,59 @@ async fn query_text(
     if dto.k == 0 || dto.k > MAX_K {
         return Err(ApiError::validation(format!("k must be in 1..={MAX_K}")));
     }
-    let provider = state.provider.clone().ok_or_else(|| {
-        ApiError::new(
-            actix_web::http::StatusCode::NOT_IMPLEMENTED,
-            "unsupported",
-            "text query needs an embedding provider: set POLYVEC_EMBEDDING_PROVIDER=stub|remote",
-        )
-    })?;
-    // The remote adapter is blocking HTTP: embed on the blocking pool.
-    let text = dto.text.clone();
-    let mut vectors = web::block(move || provider.embed(&[text.as_str()]).map_err(ApiError::from))
-        .await?
-        .map_err(|e: ApiError| e)?;
-    let query_vector = vectors.pop().expect("embed returns one vector per text");
+    let mode: RetrievalMode = dto
+        .mode
+        .as_deref()
+        .unwrap_or("vector")
+        .parse()
+        .map_err(ApiError::from)?;
+    let filter = dto.filter.filter(|f| !f.is_empty());
+    let rrf = RrfConfig::new(dto.rrf_k.unwrap_or(60.0)).map_err(ApiError::from)?;
+    // Lexical-only queries need no embedding provider; the other modes do.
+    let provider = if matches!(mode, RetrievalMode::Lexical) {
+        None
+    } else {
+        Some(state.provider.clone().ok_or_else(|| {
+            ApiError::new(
+                actix_web::http::StatusCode::NOT_IMPLEMENTED,
+                "unsupported",
+                "text query needs an embedding provider: set POLYVEC_EMBEDDING_PROVIDER=stub|remote",
+            )
+        })?)
+    };
     let ef = dto.ef.unwrap_or(0);
     if ef != 0 && !(MIN_SEARCH_EF..=MAX_SEARCH_EF).contains(&ef) {
         return Err(ApiError::validation(format!(
             "ef must be in {MIN_SEARCH_EF}..={MAX_SEARCH_EF}"
         )));
     }
+    // The remote adapter is blocking HTTP: embed on the blocking pool.
+    let query_vector: Option<Vec<f32>> = match provider {
+        Some(provider) => {
+            let text = dto.text.clone();
+            let mut vectors =
+                web::block(move || provider.embed(&[text.as_str()]).map_err(ApiError::from))
+                    .await?
+                    .map_err(|e: ApiError| e)?;
+            Some(vectors.pop().expect("embed returns one vector per text"))
+        }
+        None => None,
+    };
     let k = dto.k;
-    let response = with_store(Arc::clone(&state.registry), collection_id, move |store| {
-        let ef = if ef == 0 {
-            store.config().hnsw.ef_search
-        } else {
-            ef
-        };
-        let hits = store.search(&query_vector, k, ef)?;
-        let dtos = hits
-            .into_iter()
-            .map(|hit| QueryHitDto {
-                id: hit.vector_id.to_string(),
-                distance: hit.distance,
-                chunk_id: hit.vector_id.chunk_id().map(|c| c.to_string()),
-            })
-            .collect();
-        Ok(QueryResponseDto { hits: dtos, k, ef })
+    let text = dto.text.clone();
+    let response = with_handle(Arc::clone(&state.registry), collection_id, move |handle| {
+        crate::retrieval::run_query(
+            handle,
+            &crate::retrieval::QueryParams {
+                text: &text,
+                query_vector: query_vector.as_deref(),
+                mode,
+                k,
+                ef,
+                filter: filter.as_ref(),
+                rrf: &rrf,
+            },
+        )
     })
     .await?;
     Ok(HttpResponse::Ok().json(response))

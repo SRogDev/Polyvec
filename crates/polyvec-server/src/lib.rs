@@ -19,8 +19,9 @@
 //! `.await`).
 //!
 //! Dependency rule: this crate may depend on `polyvec-core`,
-//! `polyvec-storage`, `polyvec-embeddings`, and `polyvec-ingestion` —
-//! never the other way around. Actix/Tokio types never leave this crate.
+//! `polyvec-storage`, `polyvec-embeddings`, `polyvec-ingestion`, and
+//! `polyvec-retrieval` — never the other way around. Actix/Tokio types
+//! never leave this crate.
 //!
 //! Ingestion (`/ingest`, `/jobs`) runs through `polyvec-ingestion`'s
 //! [`JobRunner`](polyvec_ingestion::JobRunner): handlers only submit and
@@ -31,6 +32,7 @@ pub mod config;
 pub mod error;
 pub mod ingest;
 pub mod registry;
+pub mod retrieval;
 pub mod routes;
 pub mod schemas;
 

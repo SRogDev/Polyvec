@@ -45,6 +45,16 @@ fn test_config() -> CollectionConfig {
 
 struct TestDocStore {
     store: Mutex<CollectionStore>,
+    lexical_calls: Mutex<Vec<LexicalCall>>,
+}
+
+/// Records how the runner drives the lexical hooks: the ingestion crate
+/// owns the trait, the real tantivy behavior lives in `polyvec-retrieval`
+/// (tested there) and in the server wiring (tested at the HTTP level).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LexicalCall {
+    Index { doc_id: String, chunks: usize },
+    Remove { doc_id: String },
 }
 
 impl TestDocStore {
@@ -72,6 +82,22 @@ impl DocStore for TestDocStore {
             .lock()
             .unwrap()
             .ingest_document(doc, chunks, vectors)
+    }
+    fn index_lexical(&self, doc: &Document, chunks: &[Chunk]) -> Result<()> {
+        self.lexical_calls.lock().unwrap().push(LexicalCall::Index {
+            doc_id: doc.id.as_str().to_string(),
+            chunks: chunks.len(),
+        });
+        Ok(())
+    }
+    fn remove_lexical(&self, id: &DocumentId) -> Result<()> {
+        self.lexical_calls
+            .lock()
+            .unwrap()
+            .push(LexicalCall::Remove {
+                doc_id: id.as_str().to_string(),
+            });
+        Ok(())
     }
     fn delete_document(&self, id: &DocumentId) -> Result<()> {
         self.store.lock().unwrap().delete_document(id)
@@ -105,6 +131,7 @@ impl TestOpener {
             };
             Arc::new(TestDocStore {
                 store: Mutex::new(store),
+                lexical_calls: Mutex::new(Vec::new()),
             })
         }))
     }
@@ -845,4 +872,148 @@ async fn unknown_collection_fails_job() {
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Failed);
     assert_eq!(job.error.unwrap().kind, "permanent");
+}
+
+// ---------------------------------------------------------------------------
+// runner: lexical wiring (Phase 5)
+//
+// The runner drives chunk-text indexing through the `DocStore` trait in the
+// same job as vector indexing. These tests assert the wiring (call order
+// and arguments); the tantivy behavior itself is tested in
+// `polyvec-retrieval`, and the server-side propagation end-to-end at the
+// HTTP level.
+// ---------------------------------------------------------------------------
+
+fn lexical_calls_of(opener: &TestOpener, coll: &CollectionId) -> Vec<LexicalCall> {
+    opener.raw(coll).lexical_calls.lock().unwrap().clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ingest_indexes_chunk_text_in_the_same_job() {
+    let dir = tmp("lex-ingest");
+    let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
+    let coll = CollectionId::new("kb").unwrap();
+
+    let id = runner
+        .try_submit_ingest(ingest_req("src://lex", "lexical hook content here"))
+        .unwrap();
+    let job = wait_done(&runner, &id).await;
+    assert_eq!(job.state, JobState::Done);
+    let affected = job.affected.unwrap();
+    assert!(!affected.skipped);
+
+    let doc_id = DocumentId::for_source(&coll, "src://lex")
+        .as_str()
+        .to_string();
+    assert_eq!(
+        lexical_calls_of(&opener, &coll),
+        vec![LexicalCall::Index {
+            doc_id: doc_id.clone(),
+            chunks: usize::try_from(affected.chunks).unwrap(),
+        }],
+        "one lexical upsert per ingest, in the same job"
+    );
+
+    // Unchanged re-ingest skips everything — including the lexical hook
+    // (nothing changed, so the lexical view is already correct).
+    let id2 = runner
+        .try_submit_ingest(ingest_req("src://lex", "lexical hook content here"))
+        .unwrap();
+    let job2 = wait_done(&runner, &id2).await;
+    assert!(job2.affected.unwrap().skipped);
+    assert_eq!(
+        lexical_calls_of(&opener, &coll).len(),
+        1,
+        "skipped re-ingest must not re-index"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn update_reindexes_changed_chunks() {
+    let dir = tmp("lex-update");
+    let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
+    let coll = CollectionId::new("kb").unwrap();
+
+    let id1 = runner
+        .try_submit_ingest(ingest_req("src://lexupd", "first version text"))
+        .unwrap();
+    assert_eq!(wait_done(&runner, &id1).await.state, JobState::Done);
+    let id2 = runner
+        .try_submit_ingest(ingest_req("src://lexupd", "second version text here"))
+        .unwrap();
+    let job2 = wait_done(&runner, &id2).await;
+    assert_eq!(job2.state, JobState::Done);
+    assert_eq!(job2.affected.unwrap().version, 2);
+
+    let doc_id = DocumentId::for_source(&coll, "src://lexupd")
+        .as_str()
+        .to_string();
+    let calls = lexical_calls_of(&opener, &coll);
+    assert_eq!(calls.len(), 2, "update must re-index, got: {calls:?}");
+    assert!(
+        matches!(&calls[1], LexicalCall::Index { doc_id: d, .. } if d == &doc_id),
+        "second call re-indexes the same document, got: {calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_job_removes_lexical_entries() {
+    let dir = tmp("lex-delete");
+    let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
+    let coll = CollectionId::new("kb").unwrap();
+
+    let id1 = runner
+        .try_submit_ingest(ingest_req("src://lexdel", "doomed lexical content"))
+        .unwrap();
+    assert_eq!(wait_done(&runner, &id1).await.state, JobState::Done);
+
+    let del = DeleteRequest {
+        collection: coll.clone(),
+        source: "src://lexdel".to_string(),
+        idempotency_key: None,
+        max_attempts: None,
+    };
+    let id2 = runner.try_submit_delete(del).unwrap();
+    assert_eq!(wait_done(&runner, &id2).await.state, JobState::Done);
+
+    let doc_id = DocumentId::for_source(&coll, "src://lexdel")
+        .as_str()
+        .to_string();
+    let calls = lexical_calls_of(&opener, &coll);
+    assert!(
+        calls.iter().any(|c| *c
+            == LexicalCall::Remove {
+                doc_id: doc_id.clone()
+            }),
+        "delete must scrub the lexical index, got: {calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_of_missing_document_still_scrubs_lexical() {
+    let dir = tmp("lex-delete-missing");
+    let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
+    let coll = CollectionId::new("kb").unwrap();
+
+    // No ingest: the document never existed. The delete is a no-op
+    // success, but the lexical scrub must still run (a previously failed
+    // delete could have left ghost entries).
+    let del = DeleteRequest {
+        collection: coll.clone(),
+        source: "src://never-there".to_string(),
+        idempotency_key: None,
+        max_attempts: None,
+    };
+    let id = runner.try_submit_delete(del).unwrap();
+    let job = wait_done(&runner, &id).await;
+    assert_eq!(job.state, JobState::Done);
+    assert!(job.affected.unwrap().skipped);
+
+    let doc_id = DocumentId::for_source(&coll, "src://never-there")
+        .as_str()
+        .to_string();
+    assert_eq!(
+        lexical_calls_of(&opener, &coll),
+        vec![LexicalCall::Remove { doc_id }],
+    );
 }

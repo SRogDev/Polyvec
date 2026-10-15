@@ -1,4 +1,4 @@
-# Polyvec HTTP API (Phase 3)
+# Polyvec HTTP API (Phase 5)
 
 Base URL: `http://127.0.0.1:8080`. All `/v1` paths return JSON.
 The server binds **localhost only** by default; see [Configuration](#configuration).
@@ -126,12 +126,42 @@ curl localhost:8080/v1/jobs/job-00000001
 # List recent jobs for a collection (newest first; ?limit=, default 100, max 1000).
 curl 'localhost:8080/v1/collections/kb-main/jobs?limit=10'
 
-# Text query: embeds with the configured provider, then searches. 501 when
-# no provider is configured.
+# Text query: retrieval modes (Phase 5)
+#
+# mode: "vector" (default) | "lexical" | "hybrid".
+# Lexical needs no embedding provider; vector/hybrid do (501 otherwise).
 curl -X POST localhost:8080/v1/collections/kb-main/query \
   -H 'content-type: application/json' \
-  -d '{"text":"hello world","k":5}'
-# {"hits":[{"id":"...","distance":0.12,"chunk_id":"...#v1#c000000"}],"k":5,"ef":32}
+  -d '{"text":"hello world","k":5,"mode":"hybrid","rrf_k":60}'
+# {"mode":"hybrid","k":5,"ef":32,"rrf_k":60.0,
+#  "hits":[{"rank":1,"id":"...","score":0.0325,"score_kind":"rrf",
+#            "path":["vector","lexical"],
+#            "chunk_id":"...#v1#c000000","document_id":"...","vector_id":"...",
+#            "distance":0.12,"source":"https://example.com/guide",
+#            "text":"chunk text...","metadata":{"author":"roger"}}]}
+#
+# Modes:
+#   vector  (default): embed via the provider, then ANN search. score_kind
+#             "distance" (lower is better); id is the vector id.
+#   lexical: BM25 over chunk text (tantivy). No provider needed. score_kind
+#             "bm25" (higher is better); id is the chunk id.
+#   hybrid:  Reciprocal Rank Fusion of the vector + lexical rankings
+#             (rrf_k default 60). score_kind "rrf" (higher is better).
+# Scores are NEVER comparable across modes — only the rank order within one
+# response is meaningful. Full semantics: docs/retrieval.md.
+#
+# Exact-match metadata filter, honored by all three modes:
+#   -d '{"text":"...","k":5,"mode":"lexical","filter":{"author":"roger"}}'
+# Vector/hybrid apply filters post-retrieval (fewer than k hits may
+# return); lexical pushes them into the tantivy query.
+#
+# A failing subsystem fails the whole query (502 provider / 500 storage) —
+# never a silent fallback. One side with no matches contributes an empty
+# list; both empty → 200 with "hits": [].
+#
+# Legacy note: the Phase 4 query response ({"hits":[{"id","distance",
+# "chunk_id"}],"k","ef"}) is superseded by the schema above; "distance"
+# and the vector-id "id" are preserved inside vector-mode hits.
 ```
 
 Re-ingesting unchanged content returns `done` with `"skipped":true` — no new

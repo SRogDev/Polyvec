@@ -129,3 +129,25 @@ category, so it gets a documented `deny.toml` exception.
 
 **No GPL/AGPL anywhere in the Phase 4 tree.** Verified via `cargo deny check`
 (green 2026-10-15).
+
+## Phase 5 results (2026-10-15)
+
+New dependency: `tantivy 0.26.2` (`default-features = false, features = ["mmap"]`)
+in `polyvec-retrieval`. `cargo deny check` green (advisories/bans/licenses/sources).
+
+### tantivy tree (new transitive licenses)
+
+| Crate | License | Provenance | Verdict |
+|---|---|---|---|
+| `tantivy` 0.26.2 | MIT | direct | OK |
+| `foldhash` 0.2.0 | **Zlib** | tantivy → lru → hashbrown → foldhash | **Exception (documented):** same class as the Phase 2 foldhash exception; the pre-existing per-crate `deny.toml` exception covers both provenances. Only avoidable if upstream drops `lru`. Comment updated 2026-10-15. |
+
+Verified 2026-10-15: with `default-features = false`, the zstd
+(BSD-3-Clause) and rust-stemmers stacks are **gone** from the tantivy tree
+(as predicted in Phase 2) — `foldhash` (Zlib) is the **only**
+non-MIT/Apache-2.0 license the tantivy subtree introduces, and it was
+already exceptioned. `cargo tree -p polyvec-retrieval -i foldhash`
+confirms the single chain `tantivy → lru → hashbrown → foldhash`.
+
+**No GPL/AGPL anywhere in the Phase 5 tree.** Verified via `cargo deny check`
+(green 2026-10-15).

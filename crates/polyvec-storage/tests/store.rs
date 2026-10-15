@@ -643,3 +643,73 @@ fn stamp_model_tag_claims_collection_once() {
     let (store, _) = CollectionStore::open(&dir).unwrap();
     assert_eq!(store.config().model.as_ref().unwrap().name, "e5");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5: chunk lookup + document scan (retrieval enrichment, lexical rebuild)
+// ---------------------------------------------------------------------------
+
+fn make_doc(collection: &CollectionId, source: &str, n_chunks: u32) -> (Document, Vec<Chunk>) {
+    let doc_id = DocumentId::for_source(collection, source);
+    let doc = Document::new(
+        doc_id.clone(),
+        collection.clone(),
+        source.to_string(),
+        ContentHash::of(source.as_bytes()),
+        Metadata::new(),
+    );
+    let chunks: Vec<Chunk> = (0..n_chunks)
+        .map(|i| Chunk::new(doc_id.clone(), i, &format!("{source} chunk {i}"), 0, 10))
+        .collect();
+    (doc, chunks)
+}
+
+#[test]
+fn get_chunk_returns_text_for_enrichment() {
+    let dir = tmp("get-chunk");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    let collection = CollectionId::new("kb").unwrap();
+    let (doc, chunks) = make_doc(&collection, "s3://b/d.pdf", 2);
+    store.put_document(&doc, &chunks).unwrap();
+
+    let got = store
+        .get_chunk(&chunks[1].id)
+        .unwrap()
+        .expect("chunk exists");
+    assert_eq!(got.text, "s3://b/d.pdf chunk 1");
+    assert_eq!(got.document_id, doc.id);
+
+    // Unknown chunk id -> None, not an error.
+    let missing = polyvec_core::ChunkId::parse("kb#deadbeef#c000000").unwrap();
+    assert!(store.get_chunk(&missing).unwrap().is_none());
+
+    // Cascade delete removes the chunk from lookup too.
+    store.delete_document(&doc.id).unwrap();
+    assert!(store.get_chunk(&chunks[0].id).unwrap().is_none());
+}
+
+#[test]
+fn all_documents_scans_docs_with_chunks_in_key_order() {
+    let dir = tmp("all-docs");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    let collection = CollectionId::new("kb").unwrap();
+
+    assert!(store.all_documents().unwrap().is_empty());
+
+    let (doc_b, chunks_b) = make_doc(&collection, "src://b", 2);
+    let (doc_a, chunks_a) = make_doc(&collection, "src://a", 1);
+    store.put_document(&doc_b, &chunks_b).unwrap();
+    store.put_document(&doc_a, &chunks_a).unwrap();
+
+    let all = store.all_documents().unwrap();
+    assert_eq!(all.len(), 2);
+    // Key order (document ids sort by source hash, not insertion order);
+    // what matters is completeness, not order.
+    let mut sources: Vec<_> = all.iter().map(|(d, _)| d.source.clone()).collect();
+    sources.sort();
+    assert_eq!(sources, vec!["src://a".to_string(), "src://b".to_string()]);
+    for (doc, chunks) in &all {
+        let want = if doc.source == "src://a" { 1 } else { 2 };
+        assert_eq!(chunks.len(), want, "doc {}", doc.source);
+        assert!(chunks.windows(2).all(|w| w[0].index < w[1].index));
+    }
+}
