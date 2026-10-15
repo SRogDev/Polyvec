@@ -1,0 +1,50 @@
+# cargo-deny configuration — Polyvec license & security policy.
+#
+# Dependency policy (see docs/decisions/ADR-003-dual-mit-apache-license.md):
+#   * ONLY MIT and Apache-2.0 licensed dependencies are allowed.
+#   * Copyleft licenses are denied (would conflict with dual MIT/Apache-2.0).
+#
+# Run:  cargo deny check        (needs cargo-deny installed; CI runs it)
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# NOTE: this config has not yet been validated against a cargo-deny binary
+# (install was attempted; if CI flags a schema mismatch, fix here first).
+
+[graph]
+targets = []
+all-features = false
+
+[advisories]
+db-path = "~/.cargo/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[licenses]
+unlicensed = "deny"
+# Explicit allow-list: the ONLY licenses accepted in this workspace.
+allow = ["MIT", "Apache-2.0"]
+# Reject any copyleft license outright, even if OSI/FSF-approved.
+copyleft = "deny"
+allow-osi-fsf-free = "neither"
+confidence-threshold = 0.8
+exceptions = []
+include-dev = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "any"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

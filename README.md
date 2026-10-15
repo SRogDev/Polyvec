@@ -13,10 +13,35 @@ Agents should be able to query a company's entire knowledge base constantly — 
 
 ## Status
 
-**Research phase** (as of 2026-09-26): evaluating Rust crates and algorithms for massive cheap reads by agents. No code yet — see `docs/research/` for the landscape survey.
+**Implementation plan: Phases 0–9** (definitive plan, 23 sections — research
+phase is done, execution is running):
 
-**Next:** scaffold the DB core once research concludes.
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| 0 | Repository & architecture foundation | in progress |
+| 1 | Crate audit (index / storage / HTTP / embedding candidates) | next |
+| 2 | Vector index (HNSW et al., bounded graph retrieval) | planned |
+| 3 | Durable segment storage + manifest + WAL | planned |
+| 4 | Embedding provider adapters (pluggable) | planned |
+| 5 | Actix Web HTTP API | planned |
+| 6 | Server binary (wiring, config, graceful shutdown) | planned |
+| 7 | Benchmark harnesses + first measured results | planned |
+| 8 | Astro Starlight docs site | planned |
+| 9 | MVP acceptance: self-hosted engine, measured read path | planned |
+
+Progress is tracked in `STATUS.md`; each phase ships as its own PR.
+
+## Layout
+
+```text
+crates/polyvec-core/   # domain types, IDs, config contracts, shared Error
+docs/decisions/        # architecture decision records (ADRs)
+docs/audit/            # crate & license audit reports
+```
+
+`deny.toml` enforces the dependency policy (MIT/Apache-2.0 only — see
+`CONTRIBUTING.md`); `cargo audit` runs in CI.
 
 ## License
 
-No license file yet.
+Dual-licensed: MIT (`LICENSE-MIT`) OR Apache-2.0 (`LICENSE-APACHE`).

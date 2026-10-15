@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+
+# Cargo.lock is not committed for library-only workspaces.
+# Reconsider when the first binary/server crate ships (Phase 3+).
+/Cargo.lock
+
+# Environment files and local secrets — never commit
+.env
+.env.*
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
