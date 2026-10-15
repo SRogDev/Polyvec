@@ -137,6 +137,8 @@ only inside the blocking closure, never across `.await`.
 
 ```text
 POST /v1/collections/{id}/vectors/search
+  │  0. SecurityMiddleware: bearer token (401 when POLYVEC_API_KEY is set) +
+  │     per-IP token bucket (429 + Retry-After)         [polyvec-server security]
   │  1. route + Json extract (16 MiB limit → 413)      [polyvec-server routes]
   │  2. id/path validation via core constructors        [polyvec-core]
   │     (CollectionId::new, VectorId::parse; k=1..=1000, ef=8..=10000)

@@ -4,7 +4,9 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 7 (next): reliability, quality and performance (plan §15).
+- Phase 7 (this branch `phase-7-harden`): reliability tests, bearer auth +
+  rate limiting, benchmark harness — implementation done, measurement runs
+  in progress.
 
 ## Done
 - 2026-10-15 — **Phase 6 done** (branch `phase-6-relations`, unmerged):

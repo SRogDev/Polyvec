@@ -49,6 +49,9 @@ Owner: Roger (SRogDev). Discussion language: Spanish. Implementation plans for c
 - Commands: `cargo build --workspace` / `cargo test --workspace` /
   `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` /
   `cargo deny check` / `cargo audit`
+- `cargo fmt --check` (no `--all`): `--all` descends into the `vendor/markit`
+  path dependency and reformats it — never commit that; the vendored tree is
+  pinned and must stay byte-identical.
 - Rust toolchain: `export PATH="$HOME/.cargo/bin:$PATH"` (rustc 1.98.1).
 - `.github/workflows/ci.yml` exists locally but is NOT committed (stored token
   lacks `workflows` scope); commit it with a full-scope token later.
