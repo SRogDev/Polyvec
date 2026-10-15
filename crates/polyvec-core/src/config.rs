@@ -100,6 +100,65 @@ impl HnswParams {
     }
 }
 
+/// Chunking parameters: how ingested documents are sliced into chunks.
+///
+/// Part of [`CollectionConfig`]; fixed at collection creation like the rest
+/// of the config. The `version` is tracked per document so a re-chunk with
+/// different logic is detectable (a chunking-version change counts as a
+/// content change for idempotency purposes).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkingConfig {
+    /// Target chunk size in characters; sections are packed greedily up to
+    /// this size, oversized sections are hard-split.
+    pub target_chars: usize,
+    /// Overlap in characters between consecutive chunks on hard splits.
+    pub overlap_chars: usize,
+    /// Chunker version; bumped when the chunking logic changes.
+    pub version: u32,
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            target_chars: 2000,
+            overlap_chars: 200,
+            version: 1,
+        }
+    }
+}
+
+impl ChunkingConfig {
+    /// Checks the parameter ranges.
+    ///
+    /// # Errors
+    /// [`Error::Config`] if the target is below 64 chars, the overlap is not
+    /// smaller than the target, or the version is 0.
+    pub fn validate(&self) -> Result<()> {
+        if self.target_chars < 64 {
+            return Err(Error::Config {
+                detail: format!(
+                    "chunking target_chars must be >= 64, got {}",
+                    self.target_chars
+                ),
+            });
+        }
+        if self.overlap_chars >= self.target_chars {
+            return Err(Error::Config {
+                detail: format!(
+                    "chunking overlap_chars ({}) must be < target_chars ({})",
+                    self.overlap_chars, self.target_chars
+                ),
+            });
+        }
+        if self.version == 0 {
+            return Err(Error::Config {
+                detail: "chunking version must be >= 1".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Validated configuration of a collection. Immutable after creation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
@@ -113,6 +172,10 @@ pub struct CollectionConfig {
     pub model: Option<ModelTag>,
     /// HNSW parameters.
     pub hnsw: HnswParams,
+    /// Chunking parameters for the ingestion pipeline. `#[serde(default)]`
+    /// keeps databases written before Phase 4 readable.
+    #[serde(default)]
+    pub chunking: ChunkingConfig,
 }
 
 impl CollectionConfig {
@@ -129,13 +192,26 @@ impl CollectionConfig {
         }
         let hnsw = HnswParams::default();
         hnsw.validate()?;
+        let chunking = ChunkingConfig::default();
+        chunking.validate()?;
         Ok(Self {
             name,
             dimension,
             metric,
             model: None,
             hnsw,
+            chunking,
         })
+    }
+
+    /// Overrides the chunking parameters (validated).
+    ///
+    /// # Errors
+    /// [`Error::Config`] if the parameters are out of range.
+    pub fn with_chunking(mut self, chunking: ChunkingConfig) -> Result<Self> {
+        chunking.validate()?;
+        self.chunking = chunking;
+        Ok(self)
     }
 
     /// Attaches the embedding-model tag.

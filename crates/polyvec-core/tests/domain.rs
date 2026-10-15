@@ -4,8 +4,9 @@
 //! (ids, metric, config, vector, document, metadata, state) are implemented.
 
 use polyvec_core::{
-    Chunk, ChunkId, CollectionConfig, CollectionId, ContentHash, DistanceMetric, Document,
-    DocumentId, Error, HnswParams, Metadata, MetadataValue, ModelTag, Provenance, Vector, VectorId,
+    Chunk, ChunkId, ChunkingConfig, CollectionConfig, CollectionId, ContentHash, DistanceMetric,
+    Document, DocumentId, Error, HnswParams, Metadata, MetadataValue, ModelTag, Provenance, Vector,
+    VectorId,
 };
 
 // ---------------------------------------------------------------------------
@@ -286,4 +287,124 @@ fn new_error_variants_display() {
         )
         .contains("redb io")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: versioned chunk ids, chunking config, provider error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chunk_id_versioned_is_deterministic_and_version_scoped() {
+    let doc = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src");
+    let v1 = ChunkId::for_versioned_index(&doc, 1, 0);
+    assert_eq!(v1, ChunkId::for_versioned_index(&doc, 1, 0));
+    assert_ne!(
+        v1,
+        ChunkId::for_versioned_index(&doc, 2, 0),
+        "a version bump must yield fresh chunk ids"
+    );
+    assert_ne!(
+        v1,
+        ChunkId::for_index(&doc, 0),
+        "versioned ids must not collide with unversioned ones"
+    );
+    assert!(v1.as_str().contains(doc.as_str()));
+}
+
+#[test]
+fn vector_id_recovers_its_chunk_id() {
+    let doc = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src");
+    let chunk = ChunkId::for_versioned_index(&doc, 1, 3);
+    let vid = VectorId::for_chunk(&chunk);
+    assert_eq!(vid.chunk_id(), Some(chunk));
+    // A non-derived id has no recoverable chunk.
+    let odd = VectorId::parse("not-a-derived-id").unwrap();
+    assert_eq!(odd.chunk_id(), None);
+}
+
+#[test]
+fn chunk_new_versioned_derives_id_and_hash() {
+    let doc = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src");
+    let c = Chunk::new_versioned(doc.clone(), 2, 5, "hello", 0, 5);
+    assert_eq!(c.id, ChunkId::for_versioned_index(&doc, 2, 5));
+    assert_eq!(c.hash, ContentHash::of(b"hello"));
+    assert_eq!(c.document_id, doc);
+    assert_eq!(c.index, 5);
+    assert_eq!((c.char_start, c.char_end), (0, 5));
+}
+
+#[test]
+fn chunking_config_default_and_validation() {
+    let d = ChunkingConfig::default();
+    assert!(d.target_chars > d.overlap_chars);
+    assert!(d.validate().is_ok());
+    assert!(
+        ChunkingConfig {
+            target_chars: 32,
+            ..Default::default()
+        }
+        .validate()
+        .is_err(),
+        "target below minimum must fail"
+    );
+    assert!(
+        ChunkingConfig {
+            target_chars: 200,
+            overlap_chars: 200,
+            ..Default::default()
+        }
+        .validate()
+        .is_err(),
+        "overlap >= target must fail"
+    );
+    assert!(
+        ChunkingConfig {
+            version: 0,
+            ..Default::default()
+        }
+        .validate()
+        .is_err(),
+        "version 0 must fail"
+    );
+}
+
+#[test]
+fn collection_config_carries_chunking_with_serde_default() {
+    let cfg = CollectionConfig::new(
+        CollectionId::new("kb").unwrap(),
+        64,
+        DistanceMetric::Cosine,
+    )
+    .unwrap();
+    assert_eq!(cfg.chunking, ChunkingConfig::default());
+    let custom = ChunkingConfig {
+        target_chars: 500,
+        overlap_chars: 50,
+        version: 2,
+    };
+    let cfg2 = CollectionConfig::new(
+        CollectionId::new("kb").unwrap(),
+        64,
+        DistanceMetric::Cosine,
+    )
+    .unwrap()
+    .with_chunking(custom.clone())
+    .unwrap();
+    assert_eq!(cfg2.chunking, custom);
+    // A config serialized without `chunking` (Phase 3 databases) must still
+    // deserialize, falling back to the default.
+    let mut value = serde_json::to_value(&cfg).unwrap();
+    value.as_object_mut().unwrap().remove("chunking");
+    let back: CollectionConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(back.chunking, ChunkingConfig::default());
+}
+
+#[test]
+fn provider_error_displays_without_leaking_detail_shape() {
+    let e = Error::Provider {
+        detail: "embedding endpoint returned 429".to_string(),
+    };
+    let msg = e.to_string();
+    assert!(msg.contains("provider error"));
+    assert!(msg.contains("429"));
 }

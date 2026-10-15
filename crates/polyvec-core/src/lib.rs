@@ -34,7 +34,7 @@ pub mod metric;
 pub mod state;
 pub mod vector;
 
-pub use config::{CollectionConfig, HnswParams, MAX_DIMENSION, ModelTag};
+pub use config::{ChunkingConfig, CollectionConfig, HnswParams, MAX_DIMENSION, ModelTag};
 pub use document::{Chunk, Document, Provenance};
 pub use error::{Error, Result};
 pub use hash::ContentHash;
