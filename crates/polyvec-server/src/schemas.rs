@@ -4,12 +4,12 @@
 //! `polyvec-core` domain constructors before it touches storage. The DTOs
 //! never reimplement validation rules.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use polyvec_core::{
     Chunk, CollectionConfig, CollectionId, CollectionLifecycle, ContentHash, DistanceMetric,
-    Document, DocumentId, HnswParams, IndexState, Metadata, MetadataValue, ModelTag, Provenance,
-    VectorId,
+    Document, DocumentId, HnswParams, IndexState, Metadata, MetadataFilter, MetadataValue,
+    ModelTag, Provenance, RetrievalMode, RetrievalPath, ScoreKind, VectorId,
 };
 use polyvec_storage::{Stats, StoredVector};
 use serde::{Deserialize, Serialize};
@@ -285,7 +285,7 @@ pub struct DocumentResponse {
     /// Durable source identity.
     pub source: String,
     /// User metadata as plain JSON.
-    pub metadata: HashMap<String, serde_json::Value>,
+    pub metadata: BTreeMap<String, serde_json::Value>,
     /// SHA-256 of the source bytes, hex.
     pub content_hash: String,
     /// Document version.
@@ -453,16 +453,18 @@ pub fn metadata_from_json<S: std::hash::BuildHasher>(
     Ok(metadata)
 }
 
-/// Converts [`Metadata`] back to plain JSON.
+/// Converts [`Metadata`] back to plain JSON (keys in sorted order, so
+/// responses are deterministic).
 #[must_use]
-pub fn metadata_to_json(metadata: &Metadata) -> HashMap<String, serde_json::Value> {
+pub fn metadata_to_json(metadata: &Metadata) -> BTreeMap<String, serde_json::Value> {
     metadata
         .iter()
         .map(|(k, v)| {
             let json = match v {
                 MetadataValue::Str(s) => serde_json::Value::String(s.clone()),
                 MetadataValue::Int(i) => serde_json::json!(*i),
-                MetadataValue::Float(f) => serde_json::json!(*f),
+                MetadataValue::Float(f) => serde_json::Number::from_f64(*f)
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
                 MetadataValue::Bool(b) => serde_json::Value::Bool(*b),
             };
             (k.clone(), json)
@@ -693,38 +695,87 @@ pub struct JobListResponse {
 }
 
 // ---------------------------------------------------------------------------
-// text query
+// text query (Phase 5: retrieval modes + common result schema)
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/collections/{id}/query` body.
 #[derive(Debug, Deserialize)]
 pub struct QueryRequestDto {
-    /// Text to embed with the configured provider, then search.
+    /// Text to embed with the configured provider, then search. Also the
+    /// lexical query text in `lexical`/`hybrid` modes.
     pub text: String,
     /// Number of hits.
     pub k: usize,
-    /// HNSW search width (default from the collection config).
+    /// HNSW search width (default from the collection config). Ignored in
+    /// `lexical` mode.
     pub ef: Option<usize>,
+    /// Retrieval mode: `"vector"` (default — the Phase 4 behavior),
+    /// `"lexical"`, or `"hybrid"`.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Exact-match metadata filter, e.g. `{"author": "roger"}`. Honored by
+    /// all three modes (see `docs/retrieval.md`).
+    #[serde(default)]
+    pub filter: Option<MetadataFilter>,
+    /// RRF `k` for `hybrid` mode (default 60).
+    #[serde(default)]
+    pub rrf_k: Option<f64>,
 }
 
-/// One text-query hit.
+/// One retrieval hit — the common result schema across modes.
+///
+/// `id` is the hit's primary address: the vector id in `vector` mode (a
+/// raw vector may have no chunk), the chunk id in `lexical`/`hybrid`
+/// modes. `score` semantics depend on `score_kind` (documented in
+/// `docs/retrieval.md`); scores are never comparable across modes.
 #[derive(Debug, Serialize)]
-pub struct QueryHitDto {
-    /// Vector id.
+pub struct RetrievalHitDto {
+    /// 1-based rank in this response's ordering.
+    pub rank: usize,
+    /// Primary hit id (vector id in `vector` mode, chunk id otherwise).
     pub id: String,
-    /// Distance to the query vector (lower is closer).
-    pub distance: f32,
-    /// Owning chunk id, when the vector came from an ingested chunk.
+    /// Mode score: distance (`distance`), BM25 (`bm25`), or RRF (`rrf`).
+    pub score: f64,
+    /// What `score` means (and which direction is better).
+    pub score_kind: ScoreKind,
+    /// Which subsystem(s) produced this hit.
+    pub path: Vec<RetrievalPath>,
+    /// Owning chunk id (chunk hits only).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<String>,
+    /// Owning document id (chunk hits only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    /// Vector id (hits with a vector origin).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_id: Option<String>,
+    /// Raw metric distance (hits with a vector origin; lower is better).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distance: Option<f32>,
+    /// Document source URI (chunk hits only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Chunk text (chunk hits only — new in Phase 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Document metadata as plain JSON (chunk hits only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// `POST /v1/collections/{id}/query` response.
 #[derive(Debug, Serialize)]
 pub struct QueryResponseDto {
-    /// Hits ordered by increasing distance.
-    pub hits: Vec<QueryHitDto>,
+    /// The mode that answered this query.
+    pub mode: RetrievalMode,
+    /// Hits in rank order.
+    pub hits: Vec<RetrievalHitDto>,
     /// Requested `k`.
     pub k: usize,
-    /// Effective search width.
-    pub ef: usize,
+    /// Effective HNSW search width (`vector`/`hybrid` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef: Option<usize>,
+    /// Effective RRF `k` (`hybrid` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rrf_k: Option<f64>,
 }

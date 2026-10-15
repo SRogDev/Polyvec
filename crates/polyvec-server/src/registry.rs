@@ -21,15 +21,34 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use polyvec_core::{CollectionConfig, CollectionId, Error, Result};
+use polyvec_retrieval::{LexicalDocument, LexicalIndex};
 use polyvec_storage::{CollectionStore, read_collection_config};
 
 /// Shared handle to one open collection.
 pub type SharedStore = Arc<Mutex<CollectionStore>>;
 
-/// Opens `<data_dir>` and hands out lazily-opened collection stores.
+/// Shared handle to one collection's lexical index.
+pub type SharedLexical = Arc<Mutex<LexicalIndex>>;
+
+/// Everything the server holds for one open collection: the vector store
+/// and the lexical index, opened together and cached together.
+#[derive(Clone)]
+pub struct CollectionHandle {
+    /// The vector/document store.
+    pub store: SharedStore,
+    /// The tantivy lexical index over chunk text.
+    pub lexical: SharedLexical,
+}
+
+/// Opens `<data_dir>` and hands out lazily-opened collection handles.
+///
+/// The lexical index is rebuilt from the catalog on every open: the redb
+/// catalog is the source of truth and the tantivy index is derived, so a
+/// stale or corrupt lexical directory can never serve ghost results (see
+/// `docs/retrieval.md`).
 pub struct Registry {
     data_dir: PathBuf,
-    stores: Mutex<HashMap<CollectionId, SharedStore>>,
+    handles: Mutex<HashMap<CollectionId, CollectionHandle>>,
 }
 
 // Compile-time proof that `CollectionStore` can cross into `web::block`
@@ -39,6 +58,8 @@ pub struct Registry {
 fn _assert_store_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<CollectionStore>();
+    assert_send::<LexicalIndex>();
+    assert_send::<CollectionHandle>();
 }
 
 impl Registry {
@@ -48,7 +69,7 @@ impl Registry {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             data_dir,
-            stores: Mutex::new(HashMap::new()),
+            handles: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,65 +86,112 @@ impl Registry {
         self.data_dir.join(id.as_str())
     }
 
-    /// Returns the open store for `id`, opening (and recovering) it on
+    /// Returns the open handle for `id`, opening (and recovering) it on
     /// first use.
     ///
     /// # Errors
     /// [`Error::NotFound`] if no collection exists at the id's directory.
-    pub fn get_or_open(&self, id: &CollectionId) -> Result<SharedStore> {
-        let mut stores = self
-            .stores
+    pub fn get_or_open_handle(&self, id: &CollectionId) -> Result<CollectionHandle> {
+        let mut handles = self
+            .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(store) = stores.get(id) {
-            return Ok(Arc::clone(store));
+        if let Some(handle) = handles.get(id) {
+            return Ok(handle.clone());
         }
         let dir = self.collection_dir(id);
         let (store, recovery) = CollectionStore::open(&dir)?;
         if !matches!(recovery, polyvec_storage::Recovery::Clean) {
             log::info!("collection '{id}' recovered on open: {recovery:?}");
         }
-        let shared = Arc::new(Mutex::new(store));
-        stores.insert(id.clone(), Arc::clone(&shared));
-        Ok(shared)
+        let store = Arc::new(Mutex::new(store));
+        // Rebuild the lexical index from the catalog: the catalog is the
+        // source of truth; the tantivy index is derived and disposable.
+        let lexical = Self::rebuild_lexical(&dir, &store)?;
+        let handle = CollectionHandle {
+            store: Arc::clone(&store),
+            lexical: Arc::new(Mutex::new(lexical)),
+        };
+        handles.insert(id.clone(), handle.clone());
+        Ok(handle)
     }
 
-    /// Creates a collection and registers its store.
+    /// Rebuilds the lexical index at `<collection dir>/lexical` from the
+    /// catalog's documents and chunks.
+    fn rebuild_lexical(dir: &Path, store: &SharedStore) -> Result<LexicalIndex> {
+        let docs = lock_store(store)?.all_documents()?;
+        let lex_docs: Vec<LexicalDocument<'_>> = docs
+            .iter()
+            .map(|(doc, chunks)| LexicalDocument {
+                id: &doc.id,
+                metadata: &doc.metadata,
+                chunks,
+            })
+            .collect();
+        let n_chunks: usize = lex_docs.iter().map(|d| d.chunks.len()).sum();
+        let lexical = LexicalIndex::rebuild(&dir.join("lexical"), &lex_docs)?;
+        log::info!(
+            "rebuilt lexical index for '{}': {n_chunks} chunks",
+            dir.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
+        Ok(lexical)
+    }
+
+    /// Returns the open store for `id`, opening (and recovering) it on
+    /// first use.
+    ///
+    /// # Errors
+    /// [`Error::NotFound`] if no collection exists at the id's directory.
+    pub fn get_or_open(&self, id: &CollectionId) -> Result<SharedStore> {
+        Ok(self.get_or_open_handle(id)?.store)
+    }
+
+    /// Creates a collection and registers its handle.
     ///
     /// # Errors
     /// [`Error::AlreadyExists`] if the id is taken (in memory or on disk).
     pub fn create(&self, config: CollectionConfig) -> Result<()> {
         let id = config.name.clone();
-        let mut stores = self
-            .stores
+        let mut handles = self
+            .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if stores.contains_key(&id) {
+        if handles.contains_key(&id) {
             return Err(Error::AlreadyExists {
                 what: format!("collection '{id}'"),
             });
         }
         let dir = self.collection_dir(&id);
         let store = CollectionStore::create(&dir, config)?;
-        stores.insert(id, Arc::new(Mutex::new(store)));
+        // Fresh collection: the lexical index starts empty (no rebuild).
+        let lexical = LexicalIndex::open(&dir.join("lexical"))?;
+        handles.insert(
+            id,
+            CollectionHandle {
+                store: Arc::new(Mutex::new(store)),
+                lexical: Arc::new(Mutex::new(lexical)),
+            },
+        );
         Ok(())
     }
 
-    /// Removes a collection: unregisters the store, then deletes its
-    /// directory.
+    /// Removes a collection: unregisters the handle, then deletes its
+    /// directory (the lexical index lives inside it, so it goes too).
     ///
-    /// A request that already holds the store's `Arc` may still finish
+    /// A request that already holds the handle's `Arc`s may still finish
     /// against the unlinked directory (its redb handle stays valid); it
     /// cannot corrupt anything, and a later open reports `NotFound`.
     ///
     /// # Errors
     /// [`Error::NotFound`] if the collection does not exist.
     pub fn remove(&self, id: &CollectionId) -> Result<()> {
-        let mut stores = self
-            .stores
+        let mut handles = self
+            .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let existed_in_memory = stores.remove(id).is_some();
+        let existed_in_memory = handles.remove(id).is_some();
         let dir = self.collection_dir(id);
         let existed_on_disk = dir.exists();
         if !existed_in_memory && !existed_on_disk {
@@ -153,21 +221,22 @@ impl Registry {
     /// fails to decode (corrupt catalogs surface here instead of being
     /// silently skipped).
     pub fn list(&self) -> Result<Vec<CollectionConfig>> {
-        // Open stores first (from memory — no disk open, no lock conflict).
-        let stores = self
-            .stores
+        // Open handles first (from memory — no disk open, no lock conflict).
+        let handles = self
+            .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut configs = Vec::with_capacity(stores.len());
-        let mut open_names = std::collections::HashSet::with_capacity(stores.len());
-        for (id, shared) in stores.iter() {
-            let guard = shared
+        let mut configs = Vec::with_capacity(handles.len());
+        let mut open_names = std::collections::HashSet::with_capacity(handles.len());
+        for (id, handle) in handles.iter() {
+            let guard = handle
+                .store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             configs.push(guard.config().clone());
             open_names.insert(id.as_str().to_string());
         }
-        drop(stores);
+        drop(handles);
 
         // Then the data dir, skipping what is already listed.
         let entries = std::fs::read_dir(&self.data_dir).map_err(|e| {
@@ -211,13 +280,14 @@ impl Registry {
     /// collection's result is reported so a failed checkpoint is visible.
     #[must_use]
     pub fn flush_all(&self) -> Vec<(String, Result<()>)> {
-        let stores = self
-            .stores
+        let handles = self
+            .handles
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut results = Vec::with_capacity(stores.len());
-        for (id, shared) in stores.iter() {
-            let result = shared
+        let mut results = Vec::with_capacity(handles.len());
+        for (id, handle) in handles.iter() {
+            let result = handle
+                .store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .flush();
@@ -236,5 +306,18 @@ impl Registry {
 pub fn lock_store(store: &SharedStore) -> Result<MutexGuard<'_, CollectionStore>> {
     store.lock().map_err(|_| Error::Internal {
         detail: "collection store mutex poisoned".to_string(),
+    })
+}
+
+/// Locks a shared lexical index, converting poisoning into an internal
+/// error.
+///
+/// # Errors
+/// [`Error::Internal`] if the mutex is poisoned.
+pub fn lock_lexical(
+    lexical: &SharedLexical,
+) -> Result<MutexGuard<'_, polyvec_retrieval::LexicalIndex>> {
+    lexical.lock().map_err(|_| Error::Internal {
+        detail: "lexical index mutex poisoned".to_string(),
     })
 }

@@ -77,6 +77,26 @@ pub trait DocStore: Send + Sync {
     /// live vector id collides (concurrent writer).
     fn ingest_document(&self, doc: &Document, chunks: &[Chunk], vectors: &[Vector]) -> Result<()>;
 
+    /// Indexes a document's chunk texts in the lexical index (upsert:
+    /// replaces any previous entries for this document).
+    ///
+    /// The runner calls this right after [`DocStore::ingest_document`] in
+    /// the same job, so the lexical view follows the vector view. A
+    /// failure fails the job; the retry path re-ingests (the doc record is
+    /// written after this call) rather than skipping, so the lexical index
+    /// converges instead of going stale.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the lexical write fails.
+    fn index_lexical(&self, doc: &Document, chunks: &[Chunk]) -> Result<()>;
+
+    /// Removes a document's chunk entries from the lexical index.
+    /// Idempotent: removing an unknown document is a no-op success.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the lexical write fails.
+    fn remove_lexical(&self, id: &DocumentId) -> Result<()>;
+
     /// Deletes a document, cascading to its chunks and their vectors.
     ///
     /// # Errors
@@ -900,7 +920,15 @@ fn run_ingest(
         .ingest_document(&doc, &chunks, &typed_vectors)
         .map_err(PipelineError::from)?;
 
-    // 7. Durable provenance record.
+    // 7. Lexical index: chunk texts follow the vectors in the same job.
+    //    On failure the doc record below is never written, so a retry
+    //    re-ingests (new version) instead of skipping — the lexical view
+    //    converges rather than going stale.
+    store
+        .index_lexical(&doc, &chunks)
+        .map_err(PipelineError::from)?;
+
+    // 8. Durable provenance record.
     inner
         .store
         .lock()
@@ -943,16 +971,26 @@ fn run_delete(
         .get_document(&document_id)
         .map_err(PipelineError::from)?
     {
-        None => Ok(AffectedRecords {
-            document_id: document_id_str,
-            version: 0,
-            chunks: 0,
-            vectors: 0,
-            skipped: true,
-        }),
+        None => {
+            // The document is already gone; still scrub the lexical index
+            // so a previously failed delete cannot leave ghost entries.
+            store
+                .remove_lexical(&document_id)
+                .map_err(PipelineError::from)?;
+            Ok(AffectedRecords {
+                document_id: document_id_str,
+                version: 0,
+                chunks: 0,
+                vectors: 0,
+                skipped: true,
+            })
+        }
         Some((doc, _)) => {
             store
                 .delete_document(&document_id)
+                .map_err(PipelineError::from)?;
+            store
+                .remove_lexical(&document_id)
                 .map_err(PipelineError::from)?;
             inner
                 .store
