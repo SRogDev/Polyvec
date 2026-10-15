@@ -14,8 +14,8 @@
 
 use actix_web::{HttpResponse, Responder, web};
 use polyvec_core::{
-    CollectionId, Document, DocumentId, Error as CoreError, RetrievalMode, RrfConfig, Vector,
-    VectorId,
+    CollectionId, Document, DocumentId, Error as CoreError, ExpandConfig, RelationId, RelationType,
+    RetrievalMode, RrfConfig, Vector, VectorId,
 };
 use polyvec_storage::CollectionStore;
 use std::sync::Arc;
@@ -23,14 +23,16 @@ use std::sync::Arc;
 use crate::error::ApiError;
 use crate::registry::{SharedStore, lock_store};
 use crate::schemas::{
-    CollectionStatsResponse, CollectionSummary, CreateCollectionRequest, DocumentResponse,
-    DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse, IngestRequestDto,
-    IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryRequestDto,
-    ReadyResponse, SearchHitDto, SearchRequest, SearchResponse, StatsDto, UpdateVectorRequest,
-    VectorItemDto, VectorResponse, VectorsUpsertRequest, VectorsUpsertResponse, chunks_from,
-    collection_config_from, content_hash_from, metadata_from_json, parse_path_id,
+    CollectionStatsResponse, CollectionSummary, CreateCollectionRequest, CreateRelationRequest,
+    DocumentResponse, DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse,
+    IngestRequestDto, IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse,
+    QueryRequestDto, ReadyResponse, RelationDto, RelationListResponse, SearchHitDto, SearchRequest,
+    SearchResponse, StatsDto, UpdateVectorRequest, VectorItemDto, VectorResponse,
+    VectorsUpsertRequest, VectorsUpsertResponse, chunks_from, collection_config_from,
+    content_hash_from, metadata_from_json, parse_path_id,
 };
 use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF};
+use polyvec_storage::RelationQuery;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -460,6 +462,119 @@ async fn delete_document(
 }
 
 // ---------------------------------------------------------------------------
+// relations (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/collections/{id}/relations` — creates a typed relation
+/// between two existing documents/chunks.
+///
+/// * `201` with the stored relation (server-stamped `created_at`).
+/// * `400` for an unknown type, a malformed id, or a self-loop.
+/// * `404` when the collection or an endpoint is unknown.
+/// * `409` when the id is already taken.
+async fn create_relation(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CreateRelationRequest>,
+) -> Result<impl Responder, ApiError> {
+    let collection_id = collection_id(path.into_inner().as_str())?;
+    let dto = body.into_inner();
+    let relation_type: RelationType = dto.relation_type.parse().map_err(ApiError::from)?;
+    let id = dto
+        .id
+        .map(|raw| RelationId::new(&raw))
+        .transpose()
+        .map_err(ApiError::from)?;
+    if dto.source.trim().is_empty() || dto.target.trim().is_empty() {
+        return Err(ApiError::validation(
+            "relation source and target must not be empty",
+        ));
+    }
+    let metadata = metadata_from_json(&dto.metadata)?;
+    let source = dto.source.clone();
+    let target = dto.target.clone();
+    let rel = with_store(Arc::clone(&state.registry), collection_id, move |store| {
+        store.create_relation(relation_type, &source, &target, metadata, id)
+    })
+    .await?;
+    Ok(HttpResponse::Created().json(RelationDto::from(&rel)))
+}
+
+/// Query params for `GET /v1/collections/{id}/relations`.
+#[derive(Debug, serde::Deserialize)]
+struct RelationsQuery {
+    source: Option<String>,
+    target: Option<String>,
+    #[serde(rename = "type")]
+    relation_type: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// `GET /v1/collections/{id}/relations` — lists relations with optional
+/// endpoint/type filters and pagination (id order, deterministic).
+///
+/// `400` for an unknown `type` filter; `limit` defaults to 100 and is
+/// clamped to 1000 (matching `/jobs`).
+async fn list_relations(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<RelationsQuery>,
+) -> Result<impl Responder, ApiError> {
+    let collection_id = collection_id(path.into_inner().as_str())?;
+    let relation_type = query
+        .relation_type
+        .as_deref()
+        .map(str::parse::<RelationType>)
+        .transpose()
+        .map_err(ApiError::from)?;
+    let limit = query.limit.unwrap_or(100).min(1000);
+    let offset = query.offset.unwrap_or(0);
+    let q = RelationsQuery {
+        source: query.source.clone(),
+        target: query.target.clone(),
+        relation_type: query.relation_type.clone(),
+        limit: query.limit,
+        offset: query.offset,
+    };
+    let relations = with_store(Arc::clone(&state.registry), collection_id, move |store| {
+        store.list_relations(&RelationQuery {
+            source: q.source.clone(),
+            target: q.target.clone(),
+            relation_type,
+            limit,
+            offset,
+        })
+    })
+    .await?;
+    let dtos: Vec<RelationDto> = relations.iter().map(RelationDto::from).collect();
+    let count = dtos.len();
+    Ok(HttpResponse::Ok().json(RelationListResponse {
+        relations: dtos,
+        count,
+        limit,
+        offset,
+    }))
+}
+
+/// `DELETE /v1/collections/{id}/relations/{rel_id}` — deletes a relation.
+/// Idempotent: `204` even when the relation does not exist.
+async fn delete_relation(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> Result<impl Responder, ApiError> {
+    let (collection_raw, rel_raw) = path.into_inner();
+    let id = collection_id(&collection_raw)?;
+    let rel_id = RelationId::new(&rel_raw).map_err(ApiError::from)?;
+    with_store(Arc::clone(&state.registry), id, move |store| {
+        store.delete_relation(&rel_id)?;
+        Ok(())
+    })
+    .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ---------------------------------------------------------------------------
 // route registration
 // ---------------------------------------------------------------------------
 
@@ -506,6 +621,15 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, json_limit: usize) {
             .route(
                 "/collections/{id}/documents/{document_id}",
                 web::delete().to(delete_document),
+            )
+            .route(
+                "/collections/{id}/relations",
+                web::post().to(create_relation),
+            )
+            .route("/collections/{id}/relations", web::get().to(list_relations))
+            .route(
+                "/collections/{id}/relations/{rel_id}",
+                web::delete().to(delete_relation),
             )
             .route(
                 "/collections/{id}/ingest",
@@ -668,6 +792,10 @@ async fn query_text(
         .map_err(ApiError::from)?;
     let filter = dto.filter.filter(|f| !f.is_empty());
     let rrf = RrfConfig::new(dto.rrf_k.unwrap_or(60.0)).map_err(ApiError::from)?;
+    let expand: Option<ExpandConfig> = dto
+        .expand
+        .map(crate::schemas::ExpandRequestDto::into_config)
+        .transpose()?;
     // Lexical-only queries need no embedding provider; the other modes do.
     let provider = if matches!(mode, RetrievalMode::Lexical) {
         None
@@ -711,6 +839,7 @@ async fn query_text(
                 ef,
                 filter: filter.as_ref(),
                 rrf: &rrf,
+                expand: expand.as_ref(),
             },
         )
     })

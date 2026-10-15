@@ -6,17 +6,23 @@
 //! mutexes are never held at the same time (matching the lock order used
 //! by the ingestion runner), so queries cannot deadlock against writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use polyvec_core::{
-    ChunkId, Error as CoreError, MetadataFilter, RetrievalMode, RetrievalPath, RrfConfig, ScoreKind,
+    ChunkId, DocumentId, Error as CoreError, ExpandConfig, MetadataFilter, RetrievalMode,
+    RetrievalPath, RrfConfig, ScoreKind,
 };
-use polyvec_retrieval::{LexicalHit, RankedHit, reciprocal_rank_fusion};
+use polyvec_retrieval::{
+    Direction, Edge, LexicalHit, RankedHit, TraversalLimits, reciprocal_rank_fusion, traverse,
+};
 use polyvec_storage::CollectionStore;
 
 use crate::MAX_K;
 use crate::registry::{CollectionHandle, lock_lexical, lock_store};
-use crate::schemas::{QueryResponseDto, RetrievalHitDto, metadata_to_json};
+use crate::schemas::{
+    ExpandEchoDto, QueryResponseDto, RelationEvidenceDto, RelationHopDto, RetrievalHitDto,
+    metadata_to_json,
+};
 
 /// Over-fetch factor for filtered vector search. Metadata filters apply
 /// post-retrieval on the vector path (the ANN index has no filter pushdown
@@ -41,6 +47,8 @@ pub struct QueryParams<'a> {
     pub filter: Option<&'a MetadataFilter>,
     /// RRF tuning for `hybrid` mode.
     pub rrf: &'a RrfConfig,
+    /// Relationship expansion (Phase 6). `None` = Phase 5 behavior.
+    pub expand: Option<&'a ExpandConfig>,
 }
 
 /// A ranked candidate before enrichment.
@@ -113,10 +121,19 @@ pub fn run_query(
             source: e.source,
             text: e.text,
             metadata: e.metadata,
+            evidence: None,
         });
     }
     for (pos, hit) in hits.iter_mut().enumerate() {
         hit.rank = pos + 1;
+    }
+    // Relationship expansion (Phase 6): bounded BFS seeded from the base
+    // hits, appended after them with path evidence.
+    if let Some(expand) = params.expand {
+        expand_hits(&store, &mut hits, expand)?;
+        for (pos, hit) in hits.iter_mut().enumerate() {
+            hit.rank = pos + 1;
+        }
     }
     Ok(QueryResponseDto {
         mode: params.mode,
@@ -127,6 +144,7 @@ pub fn run_query(
             RetrievalMode::Hybrid => Some(params.rrf.k),
             _ => None,
         },
+        expand: params.expand.map(ExpandEchoDto::from),
     })
 }
 
@@ -332,4 +350,165 @@ fn hybrid_candidates(
         });
     }
     Ok(candidates)
+}
+// ---------------------------------------------------------------------------
+// relationship expansion (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Default fan-out cap for query-time traversal: supernode protection
+/// (a document cited by thousands of others). See `docs/retrieval.md`.
+const EXPAND_FANOUT: usize = 64;
+/// Wall-clock backstop for query-time traversal, in milliseconds.
+const EXPAND_MAX_MILLIS: u64 = 2000;
+
+/// Enrichment fields for one expanded node.
+struct ExpandedEnriched {
+    chunk_id: Option<String>,
+    document_id: Option<String>,
+    source: Option<String>,
+    text: Option<String>,
+    metadata: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// Enriches an expanded node: chunk nodes get the chunk treatment,
+/// document nodes get document-level fields (a document has no chunk
+/// text of its own). Returns `None` when the endpoint vanished
+/// mid-query — the caller skips it, never serving half-built hits.
+fn enrich_expanded(
+    store: &CollectionStore,
+    node: &str,
+) -> Result<Option<ExpandedEnriched>, CoreError> {
+    // Chunk and document ids share a loose validated shape; disambiguate
+    // by table lookup, chunk first (a string is never both).
+    if let Ok(chunk_id) = ChunkId::parse(node) {
+        if let Some(e) = enrich(store, &chunk_id)? {
+            return Ok(Some(ExpandedEnriched {
+                chunk_id: Some(chunk_id.as_str().to_string()),
+                document_id: e.document_id,
+                source: e.source,
+                text: e.text,
+                metadata: e.metadata,
+            }));
+        }
+    }
+    if let Ok(doc_id) = DocumentId::parse(node) {
+        match store.get_document(&doc_id) {
+            Ok((doc, _)) => {
+                return Ok(Some(ExpandedEnriched {
+                    chunk_id: None,
+                    document_id: Some(doc_id.as_str().to_string()),
+                    source: Some(doc.source.clone()),
+                    text: None,
+                    metadata: Some(metadata_to_json(&doc.metadata)),
+                }));
+            }
+            Err(CoreError::NotFound { .. }) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(None)
+}
+
+/// Runs bounded relationship expansion and appends the reached nodes as
+/// hits after the base hits (ranks are reassigned by the caller).
+///
+/// Seeds are the chunk + document ids of every base hit. Raw-vector hits
+/// (no chunk/document) contribute no seeds. Nodes already present as base
+/// hits are not re-added.
+fn expand_hits(
+    store: &CollectionStore,
+    hits: &mut Vec<RetrievalHitDto>,
+    expand: &ExpandConfig,
+) -> Result<(), CoreError> {
+    let mut seeds: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let base_ids: HashSet<String> = hits.iter().map(|h| h.id.clone()).collect();
+    for hit in hits.iter() {
+        for id in [&hit.chunk_id, &hit.document_id].into_iter().flatten() {
+            if seen.insert(id.clone()) {
+                seeds.push(id.clone());
+            }
+        }
+    }
+    if seeds.is_empty() {
+        return Ok(());
+    }
+    let limits = TraversalLimits {
+        max_depth: expand.depth,
+        max_nodes: expand.max_nodes,
+        max_fanout: EXPAND_FANOUT,
+        max_millis: EXPAND_MAX_MILLIS,
+    };
+    let expanded = traverse(
+        &seeds,
+        |node| -> Result<Vec<Edge>, CoreError> {
+            let mut edges = Vec::new();
+            for rel in store.relations_incident(node)? {
+                if !expand.allows(rel.relation_type) {
+                    continue;
+                }
+                let outgoing = rel.source == node;
+                edges.push(Edge {
+                    relation_id: rel.id.as_str().to_string(),
+                    relation_type: rel.relation_type,
+                    direction: if outgoing {
+                        Direction::Outgoing
+                    } else {
+                        Direction::Incoming
+                    },
+                    neighbor: if outgoing {
+                        rel.target.clone()
+                    } else {
+                        rel.source.clone()
+                    },
+                });
+            }
+            Ok(edges)
+        },
+        &limits,
+    )?;
+    for node in &expanded {
+        if base_ids.contains(&node.node) {
+            continue;
+        }
+        let Some(enriched) = enrich_expanded(store, &node.node)? else {
+            log::warn!("expand: node '{}' lost its endpoint; skipping", node.node);
+            continue;
+        };
+        hits.push(RetrievalHitDto {
+            rank: 0, // reassigned by the caller
+            id: node.node.clone(),
+            // Hops from the nearest base hit; lower is better. Never
+            // compared with base-hit scores (different universe — see
+            // docs/retrieval.md).
+            score: f64::from(node.hops),
+            score_kind: ScoreKind::Relationship,
+            path: vec![RetrievalPath::Relationship],
+            chunk_id: enriched.chunk_id,
+            document_id: enriched.document_id,
+            // Expanded hits have no vector origin: no vector id, no
+            // distance.
+            vector_id: None,
+            distance: None,
+            source: enriched.source,
+            text: enriched.text,
+            metadata: enriched.metadata,
+            evidence: Some(RelationEvidenceDto {
+                hops: node.hops,
+                path: node
+                    .path
+                    .iter()
+                    .map(|hop| RelationHopDto {
+                        relation_id: hop.relation_id.clone(),
+                        relation_type: hop.relation_type,
+                        direction: match hop.direction {
+                            Direction::Outgoing => "outgoing",
+                            Direction::Incoming => "incoming",
+                        },
+                    })
+                    .collect(),
+            }),
+        });
+    }
+    Ok(())
 }

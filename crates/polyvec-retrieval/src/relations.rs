@@ -126,11 +126,16 @@ impl TraversalLimits {
 /// * Fan-out beyond `max_fanout` is truncated after sorting (documented).
 /// * Stops when any bound is hit; hitting the time budget returns the
 ///   nodes found so far (a bound, not an error).
-pub fn traverse(
+/// * The adjacency function may fail (e.g. storage I/O); the error
+///   propagates and aborts the traversal — bounds never mask failures.
+///
+/// # Errors
+/// Whatever `E` the adjacency function returns.
+pub fn traverse<E>(
     seeds: &[String],
-    adjacency: impl Fn(&str) -> Vec<Edge>,
+    adjacency: impl Fn(&str) -> std::result::Result<Vec<Edge>, E>,
     limits: &TraversalLimits,
-) -> Vec<ExpandedNode> {
+) -> std::result::Result<Vec<ExpandedNode>, E> {
     let start = Instant::now();
     // Owned ids: traversal must not leak memory (no Box::leak) and must
     // not borrow the caller's seed slice beyond the call.
@@ -155,7 +160,7 @@ pub fn traverse(
         if hops >= u32::from(limits.max_depth) {
             continue;
         }
-        let mut edges = adjacency(&node);
+        let mut edges = adjacency(&node)?;
         edges.sort_by(|a, b| {
             (a.relation_type, &a.relation_id).cmp(&(b.relation_type, &b.relation_id))
         });
@@ -182,13 +187,14 @@ pub fn traverse(
             frontier.push_back((edge.neighbor, next_hops, next_path));
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::convert::Infallible;
 
     fn edge(id: &str, rel_type: RelationType, direction: Direction, neighbor: &str) -> Edge {
         Edge {
@@ -200,10 +206,12 @@ mod tests {
     }
 
     /// Builds an adjacency closure from `(node, edges)` pairs.
-    fn adjacency_of(pairs: Vec<(&str, Vec<Edge>)>) -> impl Fn(&str) -> Vec<Edge> {
+    fn adjacency_of(
+        pairs: Vec<(&str, Vec<Edge>)>,
+    ) -> impl Fn(&str) -> std::result::Result<Vec<Edge>, Infallible> {
         let map: HashMap<String, Vec<Edge>> =
             pairs.into_iter().map(|(n, e)| (n.to_string(), e)).collect();
-        move |node: &str| map.get(node).cloned().unwrap_or_default()
+        move |node: &str| std::result::Result::Ok(map.get(node).cloned().unwrap_or_default())
     }
 
     fn chain(n: usize) -> Vec<(&'static str, Vec<Edge>)> {
@@ -227,7 +235,7 @@ mod tests {
     #[test]
     fn chain_multi_hop_returns_evidence_paths() {
         let adj = adjacency_of(chain(3));
-        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default());
+        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default()).unwrap();
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].node, "b");
         assert_eq!(out[0].hops, 1);
@@ -273,7 +281,7 @@ mod tests {
                 )],
             ),
         ]);
-        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default());
+        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default()).unwrap();
         let nodes: Vec<_> = out.iter().map(|n| n.node.as_str()).collect();
         assert_eq!(nodes, vec!["b", "c"]);
     }
@@ -282,7 +290,7 @@ mod tests {
     fn depth_limit_stops_expansion() {
         let adj = adjacency_of(chain(5));
         let limits = TraversalLimits::new(2, 100, 64, 2000).unwrap();
-        let out = traverse(&["a".to_string()], adj, &limits);
+        let out = traverse(&["a".to_string()], adj, &limits).unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|n| n.hops <= 2));
     }
@@ -302,7 +310,7 @@ mod tests {
             .collect();
         let adj = adjacency_of(vec![("center", leaves)]);
         let limits = TraversalLimits::new(3, 10, 1000, 2000).unwrap();
-        let out = traverse(&["center".to_string()], adj, &limits);
+        let out = traverse(&["center".to_string()], adj, &limits).unwrap();
         assert_eq!(out.len(), 10);
     }
 
@@ -320,7 +328,7 @@ mod tests {
             .collect();
         let adj = adjacency_of(vec![("center", leaves)]);
         let limits = TraversalLimits::new(3, 1000, 5, 2000).unwrap();
-        let out = traverse(&["center".to_string()], adj, &limits);
+        let out = traverse(&["center".to_string()], adj, &limits).unwrap();
         assert_eq!(out.len(), 5);
         // Truncation happens after sorting by (type, id): the lowest ids win.
         let nodes: Vec<_> = out.iter().map(|n| n.node.as_str()).collect();
@@ -356,7 +364,8 @@ mod tests {
             &["a".to_string(), "b".to_string()],
             adj,
             &TraversalLimits::default(),
-        );
+        )
+        .unwrap();
         let nodes: Vec<_> = out.iter().map(|n| n.node.as_str()).collect();
         assert_eq!(nodes, vec!["c"]);
     }
@@ -373,7 +382,7 @@ mod tests {
                 "b",
             )],
         )]);
-        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default());
+        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].node, "b");
         assert_eq!(out[0].path[0].direction, Direction::Incoming);
@@ -386,8 +395,9 @@ mod tests {
             &["a".to_string()],
             adjacency_of(chain(4)),
             &TraversalLimits::default(),
-        );
-        let second = traverse(&["a".to_string()], adj, &TraversalLimits::default());
+        )
+        .unwrap();
+        let second = traverse(&["a".to_string()], adj, &TraversalLimits::default()).unwrap();
         assert_eq!(first, second);
     }
 
@@ -406,7 +416,7 @@ mod tests {
         // no timing flakes.
         let adj = adjacency_of(chain(3));
         let limits = TraversalLimits::new(3, 100, 64, 0).unwrap();
-        let out = traverse(&["a".to_string()], adj, &limits);
+        let out = traverse(&["a".to_string()], adj, &limits).unwrap();
         assert!(out.is_empty());
     }
 
@@ -440,7 +450,7 @@ mod tests {
                 )],
             ),
         ]);
-        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default());
+        let out = traverse(&["a".to_string()], adj, &TraversalLimits::default()).unwrap();
         let d: Vec<_> = out.iter().filter(|n| n.node == "d").collect();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].hops, 2);
