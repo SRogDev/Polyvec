@@ -1,0 +1,31 @@
+[package]
+name = "polyvec-embeddings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Embedding provider interface for Polyvec: trait, deterministic stub, OpenAI-compatible remote adapter"
+
+[lints]
+workspace = true
+
+[dependencies]
+polyvec-core.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "blocking",
+    "json",
+    # Pure-Rust TLS (no OpenSSL C dependency) with bundled WebPKI roots.
+    # Operators behind a TLS-intercepting proxy need to add their CA to the
+    # trust store out of band — documented in docs/ingestion.md.
+    "rustls",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true
