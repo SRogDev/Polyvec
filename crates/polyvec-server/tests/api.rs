@@ -5,7 +5,7 @@
 
 use actix_web::test as awtest;
 use actix_web::{App, http::StatusCode, web};
-use polyvec_embeddings::StubEmbeddingProvider;
+use polyvec_embeddings::{EmbeddingProvider, StubEmbeddingProvider};
 use polyvec_server::{AppState, EmbeddingKind, ServerConfig, configure_routes};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -1343,4 +1343,444 @@ async fn ingest_rejects_bad_content() {
     let (status, _) =
         submit_ingest(&app, "kb", json!({"source": "s", "content": {"text": ""}})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: retrieval modes (vector / lexical / hybrid)
+// ---------------------------------------------------------------------------
+
+/// POSTs a query body and returns (status, parsed JSON).
+async fn post_query(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    collection: &str,
+    payload: Value,
+) -> (StatusCode, Value) {
+    let req = awtest::TestRequest::post()
+        .uri(&format!("/v1/collections/{collection}/query"))
+        .set_json(payload)
+        .to_request();
+    let resp = awtest::call_service(app, req).await;
+    let status = resp.status();
+    let body: Value = awtest::read_body_json(resp).await;
+    (status, body)
+}
+
+/// Ingests one short plain-text doc (exactly 1 chunk) and waits for the
+/// job. Returns the job body.
+async fn ingest_text_doc(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    collection: &str,
+    source: &str,
+    text: &str,
+    metadata: Value,
+    vectors: Option<Value>,
+) -> Value {
+    let mut payload = json!({
+        "source": source,
+        "filename": "doc.txt",
+        "mime": "text/plain",
+        "content": {"text": text},
+        "metadata": metadata,
+    });
+    if let Some(v) = vectors {
+        payload["vectors"] = v;
+    }
+    let (status, body) = submit_ingest(app, collection, payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+    let job = wait_job_done(app, &job_id).await;
+    assert_eq!(job["state"], "done", "error: {}", job["error"]);
+    assert_eq!(
+        job["affected"]["chunks"], 1,
+        "fixture needs exactly 1 chunk per doc"
+    );
+    job
+}
+
+fn hit_sources(body: &Value) -> Vec<String> {
+    body["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["source"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Lexical-mode query shorthand for the stale-content test.
+async fn lex_query(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    text: &str,
+) -> (StatusCode, Value) {
+    post_query(app, "kb", json!({"text": text, "k": 5, "mode": "lexical"})).await
+}
+
+#[actix_web::test]
+async fn query_defaults_to_vector_mode_with_chunk_text() {
+    let dir = tmp_data_dir("q5-default");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://guide",
+        "ownership and borrowing in rust",
+        json!({"author": "roger"}),
+        None,
+    )
+    .await;
+
+    // No mode → Phase 4 behavior (vector), but with the Phase 5 schema.
+    let (status, body) = post_query(&app, "kb", json!({"text": "rust ownership", "k": 5})).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["mode"], "vector");
+    let hits = body["hits"].as_array().unwrap();
+    assert!(!hits.is_empty());
+    let first = &hits[0];
+    assert_eq!(first["rank"], 1);
+    assert_eq!(first["score_kind"], "distance");
+    assert_eq!(first["path"], json!(["vector"]));
+    assert!(first["id"].is_string(), "vector mode keeps the vector id");
+    assert!(first["chunk_id"].is_string());
+    assert!(first["distance"].is_number());
+    // Phase 5: hits carry chunk text + provenance. (Canonicalization
+    // appends a trailing newline — that is the stored chunk text.)
+    assert_eq!(first["text"], "ownership and borrowing in rust\n");
+    assert_eq!(first["source"], "src://guide");
+    assert_eq!(first["metadata"]["author"], "roger");
+    assert!(body["ef"].is_number(), "vector mode reports ef");
+    assert!(body.get("rrf_k").is_none() || body["rrf_k"].is_null());
+}
+
+#[actix_web::test]
+async fn query_lexical_mode_needs_no_provider() {
+    // EmbeddingKind::None: no provider at all — lexical must still work.
+    let dir = tmp_data_dir("q5-lexical-noprovider");
+    let app = test_app(dir).await;
+    create_collection(&app, "kb", 64).await;
+
+    // Direct document upsert (no vectors involved).
+    let req = awtest::TestRequest::put()
+        .uri("/v1/collections/kb/documents")
+        .set_json(json!({
+            "source": "src://music",
+            "metadata": {"author": "roger"},
+            "chunks": [{"text": "the xylophone orchestra plays nightly", "char_start": 0, "char_end": 37}],
+        }))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "xylophone", "k": 5, "mode": "lexical"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["mode"], "lexical");
+    let hits = body["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    let first = &hits[0];
+    assert_eq!(first["score_kind"], "bm25");
+    assert_eq!(first["path"], json!(["lexical"]));
+    assert!(first["score"].as_f64().unwrap() > 0.0);
+    assert_eq!(first["text"], "the xylophone orchestra plays nightly");
+    assert_eq!(first["source"], "src://music");
+    assert!(first.get("distance").is_none() || first["distance"].is_null());
+    assert!(first.get("vector_id").is_none() || first["vector_id"].is_null());
+    assert!(body.get("ef").is_none() || body["ef"].is_null());
+
+    // Absent term → 200 with no hits, not an error.
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "no-such-term-zzz", "k": 5, "mode": "lexical"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["hits"].as_array().unwrap().is_empty());
+}
+
+#[actix_web::test]
+async fn query_rejects_unknown_mode_and_bad_rrf_k() {
+    let dir = tmp_data_dir("q5-baddmode");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    let (status, body) =
+        post_query(&app, "kb", json!({"text": "x", "k": 5, "mode": "semantic"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(error_code(&body), "validation_error");
+
+    let (status, _) = post_query(
+        &app,
+        "kb",
+        json!({"text": "x", "k": 5, "mode": "hybrid", "rrf_k": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The repeatable hybrid fixture: doc A wins lexically (it alone carries
+/// the rare query term), doc B wins on vectors (its supplied vector equals
+/// the query embedding exactly), and RRF combines them sensibly — the
+/// chunk present in *both* rankings outranks the one present in only one.
+#[actix_web::test]
+async fn hybrid_fixture_lexical_wins_vector_wins_rrf_combines() {
+    let dir = tmp_data_dir("q5-hybrid-fixture");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    // The query embedding, computed with the same deterministic stub the
+    // server uses — doc B's supplied vector equals it (distance 0).
+    let stub = StubEmbeddingProvider::new(64).unwrap();
+    let query_vec = stub.embed(&["xylophone"]).unwrap().remove(0);
+    let far_vec = vec![1.0f32; 64];
+
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://a",
+        "the xylophone orchestra plays nightly",
+        json!({"author": "roger"}),
+        Some(json!([far_vec])),
+    )
+    .await;
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://b",
+        "quantum foam dynamics in plain words",
+        json!({"author": "ana"}),
+        Some(json!([query_vec])),
+    )
+    .await;
+
+    // Lexical-only: the rare term decides — doc A first.
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "xylophone", "k": 5, "mode": "lexical"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(hit_sources(&body), vec!["src://a".to_string()]);
+
+    // Vector-only: geometry decides — doc B (distance 0) first.
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "xylophone", "k": 5, "mode": "vector"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let sources = hit_sources(&body);
+    assert_eq!(sources[0], "src://b");
+    assert_eq!(body["hits"][0]["distance"], 0.0);
+
+    // Hybrid: RRF — doc A is in both rankings (lex 1/61 + vec 1/62),
+    // doc B only in the vector one (1/61). A outranks B.
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "xylophone", "k": 5, "mode": "hybrid"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["mode"], "hybrid");
+    assert_eq!(body["rrf_k"], 60.0);
+    let hits = body["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["source"], "src://a");
+    assert_eq!(hits[0]["score_kind"], "rrf");
+    assert_eq!(hits[0]["path"], json!(["vector", "lexical"]));
+    assert!(hits[0]["score"].as_f64().unwrap() > hits[1]["score"].as_f64().unwrap());
+    assert_eq!(hits[1]["source"], "src://b");
+    assert_eq!(hits[1]["path"], json!(["vector"]));
+    // Hybrid hits carry vector evidence when they have a vector origin.
+    assert_eq!(hits[1]["distance"], 0.0);
+}
+
+#[actix_web::test]
+async fn metadata_filter_is_consistent_across_modes() {
+    let dir = tmp_data_dir("q5-filter");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://roger-doc",
+        "sharedterm alpha content",
+        json!({"author": "roger"}),
+        None,
+    )
+    .await;
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://ana-doc",
+        "sharedterm beta content",
+        json!({"author": "ana"}),
+        None,
+    )
+    .await;
+
+    for mode in ["vector", "lexical", "hybrid"] {
+        let (status, body) = post_query(
+            &app,
+            "kb",
+            json!({"text": "sharedterm", "k": 5, "mode": mode, "filter": {"author": "roger"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "mode {mode}: {body}");
+        let sources = hit_sources(&body);
+        assert_eq!(
+            sources,
+            vec!["src://roger-doc".to_string()],
+            "mode {mode} must honor the filter"
+        );
+    }
+
+    // No filter → both docs.
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "sharedterm", "k": 5, "mode": "hybrid"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["hits"].as_array().unwrap().len(), 2);
+}
+
+#[actix_web::test]
+async fn updated_and_deleted_content_absent_from_lexical_results() {
+    let dir = tmp_data_dir("q5-stale");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://changing",
+        "the old text mentions blorpt",
+        json!({}),
+        None,
+    )
+    .await;
+
+    let (_, body) = lex_query(&app, "blorpt").await;
+    assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+
+    // Update: old term must vanish, new term must appear.
+    ingest_text_doc(
+        &app,
+        "kb",
+        "src://changing",
+        "the new text mentions quux",
+        json!({}),
+        None,
+    )
+    .await;
+    let (_, body) = lex_query(&app, "blorpt").await;
+    assert!(
+        body["hits"].as_array().unwrap().is_empty(),
+        "updated-away term must be absent: {body}"
+    );
+    let (_, body) = lex_query(&app, "quux").await;
+    assert_eq!(body["hits"].as_array().unwrap().len(), 1);
+
+    // Delete: nothing lexical left.
+    let (_, job_body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "quux", "k": 1, "mode": "lexical"}),
+    )
+    .await;
+    let chunk_id = job_body["hits"][0]["chunk_id"].as_str().unwrap();
+    // Chunk ids look like {doc}#v{version}#c{index}; the doc id is the prefix.
+    let doc_id = chunk_id.split("#v").next().unwrap();
+    assert!(
+        doc_id.starts_with("kb#"),
+        "unexpected chunk id shape: {chunk_id}"
+    );
+    let enc: String = doc_id.replace('#', "%23");
+    let req = awtest::TestRequest::delete()
+        .uri(&format!("/v1/collections/kb/documents/{enc}"))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let (_, body) = lex_query(&app, "quux").await;
+    assert!(
+        body["hits"].as_array().unwrap().is_empty(),
+        "deleted content must be absent: {body}"
+    );
+}
+
+/// Builds an app + its state on `dir` (state is returned so the test can
+/// shut the runner down before reopening the data dir).
+async fn build_app_with_state(
+    dir: std::path::PathBuf,
+) -> (
+    AppState,
+    impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+) {
+    let state =
+        AppState::with_provider(&test_config(dir), Some(stub_provider())).expect("test app state");
+    let app = awtest::init_service(
+        App::new()
+            .app_data(web::Data::new(state.clone()))
+            .configure(|cfg| configure_routes(cfg, TEST_JSON_LIMIT)),
+    )
+    .await;
+    (state, app)
+}
+
+#[actix_web::test]
+async fn lexical_index_rebuilt_on_reopen() {
+    let dir = tmp_data_dir("q5-reopen");
+
+    {
+        let (state, app) = build_app_with_state(dir.clone()).await;
+        create_collection(&app, "kb", 64).await;
+        ingest_text_doc(
+            &app,
+            "kb",
+            "src://persist",
+            "persistent wombat knowledge",
+            json!({}),
+            None,
+        )
+        .await;
+        // Shut down the runner: its accept-loop task holds jobs.redb open,
+        // and redb forbids opening the same file twice in one process.
+        state.runner.shutdown().await;
+        // state + app drop here, releasing every handle on the data dir.
+    }
+    // A fresh server on the same data dir rebuilds the lexical index from
+    // the catalog on open — the term must still be searchable.
+    let (_state, app) = build_app_with_state(dir).await;
+    let (status, body) = post_query(
+        &app,
+        "kb",
+        json!({"text": "wombat", "k": 5, "mode": "lexical"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(hit_sources(&body), vec!["src://persist".to_string()]);
 }

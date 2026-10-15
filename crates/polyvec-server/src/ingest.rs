@@ -15,9 +15,10 @@ use polyvec_embeddings::{EmbeddingProvider, RemoteEmbeddingProvider, StubEmbeddi
 use polyvec_ingestion::{
     CollectionOpener, DocStore, JobRunner, JobStore, MarkitConverter, RunnerLimits,
 };
+use polyvec_retrieval::LexicalDocument;
 
 use crate::config::{EmbeddingKind, ServerConfig};
-use crate::registry::{Registry, SharedStore, lock_store};
+use crate::registry::{CollectionHandle, Registry, lock_lexical, lock_store};
 
 /// Builds the configured embedding provider.
 ///
@@ -92,24 +93,24 @@ impl ServerOpener {
 
 impl CollectionOpener for ServerOpener {
     fn open(&self, id: &CollectionId) -> Result<Arc<dyn DocStore>> {
-        let store = self.registry.get_or_open(id)?;
-        Ok(Arc::new(ServerDocStore { store }))
+        let handle = self.registry.get_or_open_handle(id)?;
+        Ok(Arc::new(ServerDocStore { handle }))
     }
 }
 
-/// The server's [`DocStore`]: locks the per-collection mutex per call.
+/// The server's [`DocStore`]: locks the per-collection mutexes per call.
 /// Only ever used from the runner's blocking threads.
 pub struct ServerDocStore {
-    store: SharedStore,
+    handle: CollectionHandle,
 }
 
 impl DocStore for ServerDocStore {
     fn config(&self) -> Result<CollectionConfig> {
-        Ok(lock_store(&self.store)?.config().clone())
+        Ok(lock_store(&self.handle.store)?.config().clone())
     }
 
     fn get_document(&self, id: &DocumentId) -> Result<Option<(Document, Vec<Chunk>)>> {
-        let store = lock_store(&self.store)?;
+        let store = lock_store(&self.handle.store)?;
         match store.get_document(id) {
             Ok(found) => Ok(Some(found)),
             Err(Error::NotFound { .. }) => Ok(None),
@@ -118,22 +119,36 @@ impl DocStore for ServerDocStore {
     }
 
     fn vectors_present(&self, chunks: &[Chunk]) -> Result<bool> {
-        let store = lock_store(&self.store)?;
+        let store = lock_store(&self.handle.store)?;
         store.vectors_present(chunks)
     }
 
     fn ingest_document(&self, doc: &Document, chunks: &[Chunk], vectors: &[Vector]) -> Result<()> {
-        let mut store = lock_store(&self.store)?;
+        let mut store = lock_store(&self.handle.store)?;
         store.ingest_document(doc, chunks, vectors)
     }
 
+    fn index_lexical(&self, doc: &Document, chunks: &[Chunk]) -> Result<()> {
+        let mut lexical = lock_lexical(&self.handle.lexical)?;
+        lexical.upsert_document(&LexicalDocument {
+            id: &doc.id,
+            metadata: &doc.metadata,
+            chunks,
+        })
+    }
+
+    fn remove_lexical(&self, id: &DocumentId) -> Result<()> {
+        let mut lexical = lock_lexical(&self.handle.lexical)?;
+        lexical.delete_document(id)
+    }
+
     fn stamp_model_tag(&self, model: &polyvec_core::ModelTag) -> Result<()> {
-        let mut store = lock_store(&self.store)?;
+        let mut store = lock_store(&self.handle.store)?;
         store.stamp_model_tag(model)
     }
 
     fn delete_document(&self, id: &DocumentId) -> Result<()> {
-        let mut store = lock_store(&self.store)?;
+        let mut store = lock_store(&self.handle.store)?;
         store.delete_document(id)
     }
 }

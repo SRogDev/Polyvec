@@ -2423,6 +2423,7 @@ dependencies = [
  "polyvec-core",
  "polyvec-embeddings",
  "polyvec-ingestion",
+ "polyvec-retrieval",
  "polyvec-storage",
  "serde",
  "serde_json",
