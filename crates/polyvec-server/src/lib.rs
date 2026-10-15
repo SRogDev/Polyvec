@@ -94,8 +94,7 @@ impl AppState {
     ) -> Result<Self, String> {
         let registry = Arc::new(Registry::new(config.data_dir.clone()));
         let runner = build_runner(config, provider.clone())?;
-        let opener: Arc<dyn CollectionOpener> =
-            Arc::new(ServerOpener::new(Arc::clone(&registry)));
+        let opener: Arc<dyn CollectionOpener> = Arc::new(ServerOpener::new(Arc::clone(&registry)));
         runner.spawn(opener);
         Ok(Self {
             registry,

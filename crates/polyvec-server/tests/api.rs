@@ -1055,8 +1055,7 @@ async fn test_app_with_provider(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    let state =
-        AppState::with_provider(&test_config(data_dir), provider).expect("test app state");
+    let state = AppState::with_provider(&test_config(data_dir), provider).expect("test app state");
     awtest::init_service(
         App::new()
             .app_data(web::Data::new(state))
@@ -1124,7 +1123,8 @@ async fn ingest_and_query_end_to_end() {
     create_collection(&app, "kb", 64).await;
 
     // 1. Ingest HTML bytes (base64) → 202 with a job id.
-    let html = "<html><body><h1>Rust guide</h1><p>Ownership, borrowing, lifetimes.</p></body></html>";
+    let html =
+        "<html><body><h1>Rust guide</h1><p>Ownership, borrowing, lifetimes.</p></body></html>";
     let payload = json!({
         "source": "https://example.com/rust",
         "filename": "rust.html",
@@ -1201,7 +1201,11 @@ async fn ingest_and_query_end_to_end() {
         .uri(&format!("/v1/collections/kb/documents/{encoded_id}"))
         .to_request();
     let resp = awtest::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "delete {document_id}");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete {document_id}"
+    );
     let req = awtest::TestRequest::post()
         .uri("/v1/collections/kb/query")
         .set_json(json!({"text": "rust ownership borrowing", "k": 5}))
@@ -1336,11 +1340,7 @@ async fn ingest_rejects_bad_content() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Empty content.
-    let (status, _) = submit_ingest(
-        &app,
-        "kb",
-        json!({"source": "s", "content": {"text": ""}}),
-    )
-    .await;
+    let (status, _) =
+        submit_ingest(&app, "kb", json!({"source": "s", "content": {"text": ""}})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }

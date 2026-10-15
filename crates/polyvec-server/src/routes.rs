@@ -21,11 +21,12 @@ use crate::error::ApiError;
 use crate::registry::{SharedStore, lock_store};
 use crate::schemas::{
     CollectionStatsResponse, CollectionSummary, CreateCollectionRequest, DocumentResponse,
-    DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse,
-    IngestRequestDto, IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryHitDto, QueryRequestDto, QueryResponseDto,
-    ReadyResponse, SearchHitDto, SearchRequest, SearchResponse, StatsDto, UpdateVectorRequest,
-    VectorItemDto, VectorResponse, VectorsUpsertRequest, VectorsUpsertResponse, chunks_from,
-    collection_config_from, content_hash_from, metadata_from_json, parse_path_id,
+    DocumentUpsertRequest, DocumentUpsertResponse, FlushResponse, HealthResponse, IngestRequestDto,
+    IngestResponseDto, JobDto, JobListResponse, ListCollectionsResponse, QueryHitDto,
+    QueryRequestDto, QueryResponseDto, ReadyResponse, SearchHitDto, SearchRequest, SearchResponse,
+    StatsDto, UpdateVectorRequest, VectorItemDto, VectorResponse, VectorsUpsertRequest,
+    VectorsUpsertResponse, chunks_from, collection_config_from, content_hash_from,
+    metadata_from_json, parse_path_id,
 };
 use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF};
 
@@ -460,7 +461,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, json_limit: usize) {
                 "/collections/{id}/documents/{document_id}",
                 web::delete().to(delete_document),
             )
-            .route("/collections/{id}/ingest", web::post().to(ingest_collection))
+            .route(
+                "/collections/{id}/ingest",
+                web::post().to(ingest_collection),
+            )
             .route("/collections/{id}/jobs", web::get().to(list_jobs))
             .route("/collections/{id}/query", web::post().to(query_text))
             .route("/jobs/{job_id}", web::get().to(get_job)),
@@ -519,7 +523,9 @@ async fn ingest_collection(
     // The collection must exist (404 here, not a failed job); the submit
     // itself is a quick redb transaction. Both run in `web::block`.
     let job_id = web::block(move || {
-        registry.get_or_open(&collection_id).map_err(ApiError::from)?;
+        registry
+            .get_or_open(&collection_id)
+            .map_err(ApiError::from)?;
         runner.try_submit_ingest(req).map_err(ApiError::from)
     })
     .await?
@@ -597,9 +603,7 @@ async fn query_text(
         return Err(ApiError::validation("text must not be empty"));
     }
     if dto.k == 0 || dto.k > MAX_K {
-        return Err(ApiError::validation(format!(
-            "k must be in 1..={MAX_K}"
-        )));
+        return Err(ApiError::validation(format!("k must be in 1..={MAX_K}")));
     }
     let provider = state.provider.clone().ok_or_else(|| {
         ApiError::new(
@@ -622,7 +626,11 @@ async fn query_text(
     }
     let k = dto.k;
     let response = with_store(Arc::clone(&state.registry), collection_id, move |store| {
-        let ef = if ef == 0 { store.config().hnsw.ef_search } else { ef };
+        let ef = if ef == 0 {
+            store.config().hnsw.ef_search
+        } else {
+            ef
+        };
         let hits = store.search(&query_vector, k, ef)?;
         let dtos = hits
             .into_iter()

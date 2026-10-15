@@ -38,10 +38,9 @@ impl StubEmbeddingProvider {
         // `dimension` components in [-1, 1).
         let mut state = digest[0..8]
             .try_into()
-            .map(u64::from_le_bytes)
-            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+            .map_or(0x9e37_79b9_7f4a_7c15, u64::from_le_bytes);
         if state == 0 {
-            state = 0x9e3779b97f4a7c15;
+            state = 0x9e37_79b9_7f4a_7c15;
         }
         let dim = self.dimension as usize;
         let mut v = Vec::with_capacity(dim);
@@ -50,10 +49,20 @@ impl StubEmbeddingProvider {
             state ^= state >> 12;
             state ^= state << 25;
             state ^= state >> 27;
-            let x = state.wrapping_mul(0x2545F4914F6CDD1D);
-            // Top 53 bits → [0, 1) → [-1, 1).
-            let u = ((x >> 11) as f64) / (1u64 << 53) as f64;
-            v.push((u * 2.0 - 1.0) as f32);
+            let x = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            // Top 53 bits → [0, 1) → [-1, 1). The casts are lossy by
+            // design: this is a deterministic stub, not a statistical
+            // sampler; all that matters is determinism.
+            #[allow(clippy::cast_precision_loss)]
+            let shifted = (x >> 11) as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let scale = (1u64 << 53) as f64;
+            let u = shifted / scale;
+            // f32 is the embedding dtype; the truncation is inherent to the
+            // stub's output type, not a precision bug.
+            #[allow(clippy::cast_possible_truncation)]
+            let component = (u * 2.0 - 1.0) as f32;
+            v.push(component);
         }
         // L2-normalize (guard against the measure-zero all-zeros case).
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();

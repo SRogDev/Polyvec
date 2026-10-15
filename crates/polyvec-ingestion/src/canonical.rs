@@ -59,14 +59,14 @@ pub fn normalize_markdown(input: &str) -> String {
             blank_run += 1;
             continue;
         }
-        if !started {
-            started = true;
-        } else {
+        if started {
             // At most one blank line (two \n) between content lines.
             let blanks = blank_run.min(1);
             for _ in 0..=blanks {
                 out.push('\n');
             }
+        } else {
+            started = true;
         }
         blank_run = 0;
         out.push_str(trimmed);

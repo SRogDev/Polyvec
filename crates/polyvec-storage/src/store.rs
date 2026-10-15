@@ -717,9 +717,12 @@ impl CollectionStore {
             None => {}
         }
         self.config.model = Some(tag.clone());
-        let mut record = self.catalog.collection_get()?.ok_or_else(|| Error::Corrupt {
-            detail: "collection record missing while stamping model tag".to_string(),
-        })?;
+        let mut record = self
+            .catalog
+            .collection_get()?
+            .ok_or_else(|| Error::Corrupt {
+                detail: "collection record missing while stamping model tag".to_string(),
+            })?;
         record.config = self.config.clone();
         self.catalog.collection_put(&record)?;
         Ok(())

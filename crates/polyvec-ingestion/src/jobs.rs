@@ -258,7 +258,14 @@ impl JobStore {
         max_attempts: u32,
     ) -> Result<IngestionJob> {
         let write = self.db.begin_write().map_err(storage_error)?;
-        let job = Self::insert_job(&write, collection, source, op, idempotency_key, max_attempts)?;
+        let job = Self::insert_job(
+            &write,
+            collection,
+            source,
+            op,
+            idempotency_key,
+            max_attempts,
+        )?;
         write.commit().map_err(storage_error)?;
         Ok(job)
     }
@@ -278,8 +285,7 @@ impl JobStore {
             let next: u64 = meta
                 .get("job_counter")
                 .map_err(storage_error)?
-                .map(|g| g.value().parse().unwrap_or(0))
-                .unwrap_or(0)
+                .map_or(0, |g| g.value().parse().unwrap_or(0))
                 + 1;
             meta.insert("job_counter", next.to_string().as_str())
                 .map_err(storage_error)?;
@@ -369,7 +375,8 @@ impl JobStore {
     ///
     /// # Errors
     /// [`Error::Storage`] on database failure.
-    pub fn find_by_idempotency(&self, key: &str) -> Result<Option<IngestionJob>> {        let read = self.db.begin_read().map_err(storage_error)?;
+    pub fn find_by_idempotency(&self, key: &str) -> Result<Option<IngestionJob>> {
+        let read = self.db.begin_read().map_err(storage_error)?;
         let idem = read.open_table(T_IDEMPOTENCY).map_err(storage_error)?;
         let Some(id) = idem.get(key).map_err(storage_error)? else {
             return Ok(None);

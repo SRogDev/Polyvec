@@ -23,7 +23,7 @@ log.workspace = true
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # Vendored markit (rust/ @ 4197c76a; HTTP fetching stubbed, mimalloc removed —
 # see vendor/markit/VENDOR.md). Not a workspace member: built as a dependency.
-markit = { path = "../../vendor/markit", default-features = false }
+markit = { path = "../../vendor/markit", version = "0.6.1", default-features = false }
 
 [dev-dependencies]
 polyvec-storage.workspace = true

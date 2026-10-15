@@ -95,6 +95,11 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Embeds each text; the output order matches the input order.
     ///
     /// An empty input returns an empty vector without doing any work.
+    ///
+    /// # Errors
+    /// [`EmbedError`] with [`ErrorKind::Transient`] for retryable failures
+    /// (rate limits, 5xx, timeouts) and [`ErrorKind::Permanent`] for
+    /// non-retryable ones (auth, validation, dimension mismatch).
     fn embed(&self, texts: &[&str]) -> EmbedResult<Vec<Vec<f32>>>;
 
     /// Identifies the model (name + version) these vectors came from.

@@ -29,11 +29,27 @@ fn markit_converts_html_to_markdown() {
 <a href="https://example.com/docs">docs</a>.</p><ul><li>fast</li><li>cheap</li></ul>
 </body></html>"#;
     let out = c.convert(html, &html_hint()).unwrap();
-    assert!(out.markdown.contains("Getting Started"), "h1 lost:\n{}", out.markdown);
-    assert!(out.markdown.contains("cargo install"), "code lost:\n{}", out.markdown);
-    assert!(out.markdown.contains("https://example.com/docs"), "link lost:\n{}", out.markdown);
+    assert!(
+        out.markdown.contains("Getting Started"),
+        "h1 lost:\n{}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("cargo install"),
+        "code lost:\n{}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("https://example.com/docs"),
+        "link lost:\n{}",
+        out.markdown
+    );
     assert_eq!(out.conversion.converter, "markit");
-    assert!(out.conversion.source_format.contains("html"), "format: {}", out.conversion.source_format);
+    assert!(
+        out.conversion.source_format.contains("html"),
+        "format: {}",
+        out.conversion.source_format
+    );
 }
 
 #[test]
@@ -46,8 +62,16 @@ fn markit_converts_csv_to_markdown_table() {
         ..Default::default()
     };
     let out = c.convert(csv, &hint).unwrap();
-    assert!(out.markdown.contains("alice") && out.markdown.contains("95"), "rows lost:\n{}", out.markdown);
-    assert!(out.markdown.contains("name"), "header lost:\n{}", out.markdown);
+    assert!(
+        out.markdown.contains("alice") && out.markdown.contains("95"),
+        "rows lost:\n{}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("name"),
+        "header lost:\n{}",
+        out.markdown
+    );
 }
 
 #[test]
@@ -59,7 +83,11 @@ fn markit_passes_plain_text_through() {
         ..Default::default()
     };
     let out = c.convert(txt, &hint).unwrap();
-    assert!(out.markdown.contains("just some plain text"), "mangled:\n{}", out.markdown);
+    assert!(
+        out.markdown.contains("just some plain text"),
+        "mangled:\n{}",
+        out.markdown
+    );
 }
 
 #[test]
@@ -71,8 +99,16 @@ fn markit_passes_markdown_through() {
         ..Default::default()
     };
     let out = c.convert(md, &hint).unwrap();
-    assert!(out.markdown.contains("# Title"), "heading lost:\n{}", out.markdown);
-    assert!(out.markdown.contains("*markdown*"), "emphasis lost:\n{}", out.markdown);
+    assert!(
+        out.markdown.contains("# Title"),
+        "heading lost:\n{}",
+        out.markdown
+    );
+    assert!(
+        out.markdown.contains("*markdown*"),
+        "emphasis lost:\n{}",
+        out.markdown
+    );
 }
 
 #[test]
@@ -119,8 +155,16 @@ fn normalize_markdown_is_deterministic() {
     let messy = "# Title  \r\n\r\n\r\nbody with trailing space   \n";
     let clean = normalize_markdown(messy);
     assert_eq!(clean, "# Title\n\nbody with trailing space\n");
-    assert_eq!(normalize_markdown(&clean), clean, "normalization is idempotent");
-    assert_eq!(normalize_markdown(messy), clean, "normalization is deterministic");
+    assert_eq!(
+        normalize_markdown(&clean),
+        clean,
+        "normalization is idempotent"
+    );
+    assert_eq!(
+        normalize_markdown(messy),
+        clean,
+        "normalization is deterministic"
+    );
 }
 
 #[test]
@@ -167,7 +211,11 @@ fn chunker() -> Chunker {
 fn chunker_splits_on_sections_not_mid_section() {
     let md = "# Alpha\n\naaaa bbbb cccc\n\n# Beta\n\ndddd eeee ffff\n";
     let chunks = chunker().chunk(md);
-    assert!(chunks.len() >= 2, "expected section split, got {}", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "expected section split, got {}",
+        chunks.len()
+    );
     // No chunk should contain content from both sections.
     for ch in &chunks {
         assert!(

@@ -513,7 +513,11 @@ fn put_document_overwrite_keeps_counters_honest() {
 // Phase 4: atomic document ingest + model-tag stamping
 // ---------------------------------------------------------------------------
 
-fn make_versioned_doc(version: u64, texts: &[&str], dim: usize) -> (Document, Vec<Chunk>, Vec<Vector>) {
+fn make_versioned_doc(
+    version: u64,
+    texts: &[&str],
+    dim: usize,
+) -> (Document, Vec<Chunk>, Vec<Vector>) {
     let collection = CollectionId::new("kb").unwrap();
     let document_id = DocumentId::for_source(&collection, "src://phase4");
     let doc = Document {
@@ -531,7 +535,16 @@ fn make_versioned_doc(version: u64, texts: &[&str], dim: usize) -> (Document, Ve
     let chunks: Vec<Chunk> = texts
         .iter()
         .enumerate()
-        .map(|(i, t)| Chunk::new_versioned(document_id.clone(), version, i as u32, t, 0, t.len()))
+        .map(|(i, t)| {
+            Chunk::new_versioned(
+                document_id.clone(),
+                version,
+                u32::try_from(i).unwrap(),
+                t,
+                0,
+                t.len(),
+            )
+        })
         .collect();
     let vectors: Vec<Vector> = chunks
         .iter()
@@ -539,8 +552,8 @@ fn make_versioned_doc(version: u64, texts: &[&str], dim: usize) -> (Document, Ve
         .map(|(i, c)| {
             Vector::new(
                 VectorId::for_chunk(&c.id),
-                unit_vec(i as u64 + version * 100, dim),
-                dim as u32,
+                unit_vec(u64::try_from(i).unwrap() + version * 100, dim),
+                u32::try_from(dim).unwrap(),
             )
             .unwrap()
         })

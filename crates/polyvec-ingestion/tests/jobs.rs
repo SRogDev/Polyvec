@@ -11,8 +11,8 @@ use polyvec_core::{
 };
 use polyvec_embeddings::{EmbedError, EmbeddingProvider, StubEmbeddingProvider};
 use polyvec_ingestion::{
-    CollectionOpener, Converter, DeleteRequest, DocStore, IngestRequest, IngestionJob, JobId, JobOp,
-    JobRunner, JobState, JobStore, MarkitConverter, RunnerLimits, SubmitError,
+    CollectionOpener, Converter, DeleteRequest, DocStore, IngestRequest, IngestionJob, JobId,
+    JobOp, JobRunner, JobState, JobStore, MarkitConverter, RunnerLimits, SubmitError,
 };
 use polyvec_storage::CollectionStore;
 use std::collections::HashMap;
@@ -31,8 +31,12 @@ fn tmp(name: &str) -> std::path::PathBuf {
 }
 
 fn test_config() -> CollectionConfig {
-    CollectionConfig::new(CollectionId::new("kb").unwrap(), DIM, polyvec_core::DistanceMetric::Cosine)
-        .unwrap()
+    CollectionConfig::new(
+        CollectionId::new("kb").unwrap(),
+        DIM,
+        polyvec_core::DistanceMetric::Cosine,
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +201,7 @@ fn stub_provider() -> Arc<dyn EmbeddingProvider> {
     Arc::new(StubEmbeddingProvider::new(DIM).unwrap())
 }
 
-/// Builds + spawns a runner wired to a real CollectionStore.
+/// Builds + spawns a runner wired to a real `CollectionStore`.
 fn spawn_runner(
     dir: &std::path::Path,
     provider: Option<Arc<dyn EmbeddingProvider>>,
@@ -304,7 +308,10 @@ fn find_or_create_dedups_inflight_only() {
     let (b, created_b) = store
         .find_or_create(&coll, "src", JobOp::Ingest, "key-1", 5)
         .unwrap();
-    assert!(!created_b, "in-flight duplicate must return the existing job");
+    assert!(
+        !created_b,
+        "in-flight duplicate must return the existing job"
+    );
     assert_eq!(a.id, b.id);
     // Terminal jobs do not block resubmission.
     let mut done = b.clone();
@@ -339,7 +346,10 @@ async fn ingest_end_to_end_bytes_to_searchable_vectors() {
     assert!(affected.chunks > 0 && affected.vectors == affected.chunks);
 
     // The document is stored with version 1 and full provenance.
-    let doc_id = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "https://example.com/rust");
+    let doc_id = DocumentId::for_source(
+        &CollectionId::new("kb").unwrap(),
+        "https://example.com/rust",
+    );
     let store = opener.raw(&CollectionId::new("kb").unwrap());
     let (doc, chunks) = store
         .get_document(&doc_id)
@@ -365,7 +375,10 @@ async fn ingest_end_to_end_bytes_to_searchable_vectors() {
 
     // Searchable: embedding the exact chunk text finds its vector.
     let provider = StubEmbeddingProvider::new(DIM).unwrap();
-    let q = provider.embed(&[chunks[0].text.as_str()]).unwrap().remove(0);
+    let q = provider
+        .embed(&[chunks[0].text.as_str()])
+        .unwrap()
+        .remove(0);
     let hits = store.search(&q, 5, 32);
     let want = polyvec_core::VectorId::for_chunk(&chunks[0].id);
     assert!(
@@ -416,7 +429,10 @@ async fn partial_write_is_completed_not_reported_skipped() {
     let job2 = wait_done(&runner, &id2).await;
     assert_eq!(job2.state, JobState::Done, "error: {:?}", job2.error);
     let affected = job2.affected.as_ref().unwrap();
-    assert!(!affected.skipped, "partial write must not be reported skipped");
+    assert!(
+        !affected.skipped,
+        "partial write must not be reported skipped"
+    );
     assert_eq!(affected.version, 1, "must reuse the version, not bump");
 
     // And the document is searchable again.
@@ -432,7 +448,9 @@ async fn reingest_unchanged_content_creates_no_duplicates() {
     let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
 
     let content = "stable content\nsecond line\n";
-    let id1 = runner.try_submit_ingest(ingest_req("src://stable", content)).unwrap();
+    let id1 = runner
+        .try_submit_ingest(ingest_req("src://stable", content))
+        .unwrap();
     let job1 = wait_done(&runner, &id1).await;
     assert_eq!(job1.state, JobState::Done);
     assert!(!job1.affected.as_ref().unwrap().skipped);
@@ -440,7 +458,9 @@ async fn reingest_unchanged_content_creates_no_duplicates() {
     // Same bytes again (after the first job finished): new job, but the
     // pipeline detects unchanged content and skips — no new version, no new
     // vectors.
-    let id2 = runner.try_submit_ingest(ingest_req("src://stable", content)).unwrap();
+    let id2 = runner
+        .try_submit_ingest(ingest_req("src://stable", content))
+        .unwrap();
     assert_ne!(id1, id2, "terminal jobs do not block resubmission");
     let job2 = wait_done(&runner, &id2).await;
     assert_eq!(job2.state, JobState::Done);
@@ -489,7 +509,10 @@ async fn update_bumps_version_and_tombstones_old_vectors() {
     let provider = StubEmbeddingProvider::new(DIM).unwrap();
 
     let id1 = runner
-        .try_submit_ingest(ingest_req("src://changing", "the quick brown fox jumps over"))
+        .try_submit_ingest(ingest_req(
+            "src://changing",
+            "the quick brown fox jumps over",
+        ))
         .unwrap();
     assert_eq!(wait_done(&runner, &id1).await.state, JobState::Done);
 
@@ -500,11 +523,17 @@ async fn update_bumps_version_and_tombstones_old_vectors() {
         .iter()
         .map(|c| polyvec_core::VectorId::for_chunk(&c.id))
         .collect();
-    let old_query = provider.embed(&[chunks_v1[0].text.as_str()]).unwrap().remove(0);
+    let old_query = provider
+        .embed(&[chunks_v1[0].text.as_str()])
+        .unwrap()
+        .remove(0);
 
     // Changed content → version bump.
     let id2 = runner
-        .try_submit_ingest(ingest_req("src://changing", "zebra stripes in the savanna dusk"))
+        .try_submit_ingest(ingest_req(
+            "src://changing",
+            "zebra stripes in the savanna dusk",
+        ))
         .unwrap();
     let job2 = wait_done(&runner, &id2).await;
     assert_eq!(job2.state, JobState::Done);
@@ -519,8 +548,14 @@ async fn update_bumps_version_and_tombstones_old_vectors() {
     // New content is searchable.
     let (_, chunks_v2) = store.get_document(&doc_id).unwrap().unwrap();
     assert_eq!(chunks_v2.len(), chunks_v1.len());
-    assert_ne!(chunks_v2[0].id, chunks_v1[0].id, "fresh chunk ids per version");
-    let new_query = provider.embed(&[chunks_v2[0].text.as_str()]).unwrap().remove(0);
+    assert_ne!(
+        chunks_v2[0].id, chunks_v1[0].id,
+        "fresh chunk ids per version"
+    );
+    let new_query = provider
+        .embed(&[chunks_v2[0].text.as_str()])
+        .unwrap()
+        .remove(0);
     let hits = store.search(&new_query, 10, 32);
     let want = polyvec_core::VectorId::for_chunk(&chunks_v2[0].id);
     assert!(hits.iter().any(|h| h.vector_id == want));
@@ -540,7 +575,10 @@ async fn delete_cascades_to_chunks_and_vectors() {
     let doc_id = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src://doomed");
     let store = opener.raw(&CollectionId::new("kb").unwrap());
     let (_, chunks) = store.get_document(&doc_id).unwrap().unwrap();
-    let query = provider.embed(&[chunks[0].text.as_str()]).unwrap().remove(0);
+    let query = provider
+        .embed(&[chunks[0].text.as_str()])
+        .unwrap()
+        .remove(0);
     assert!(
         !store.search(&query, 5, 32).is_empty(),
         "sanity: vector searchable before delete"
@@ -560,7 +598,10 @@ async fn delete_cascades_to_chunks_and_vectors() {
         "document must be gone"
     );
     let hits = store.search(&query, 5, 32);
-    assert!(hits.is_empty(), "deleted vectors must be unsearchable, got {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "deleted vectors must be unsearchable, got {hits:?}"
+    );
     // Deleting again is a no-op success (idempotent).
     let del2 = DeleteRequest {
         collection: CollectionId::new("kb").unwrap(),
@@ -582,16 +623,23 @@ async fn delete_cascades_to_chunks_and_vectors() {
 async fn transient_provider_failure_retries_then_fails_loudly() {
     let dir = tmp("fail-transient");
     // Always transient, budget 3 → attempts == 3, then Failed with detail.
-    let provider: Arc<dyn EmbeddingProvider> = Arc::new(FlakyProvider::new(u32::MAX, FlakyMode::Transient));
+    let provider: Arc<dyn EmbeddingProvider> =
+        Arc::new(FlakyProvider::new(u32::MAX, FlakyMode::Transient));
     let (runner, opener) = spawn_runner(&dir, Some(provider));
 
-    let id = runner.try_submit_ingest(ingest_req("src://flaky", "will never embed")).unwrap();
+    let id = runner
+        .try_submit_ingest(ingest_req("src://flaky", "will never embed"))
+        .unwrap();
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Failed, "failed jobs stay failed");
     assert_eq!(job.attempts, 3, "bounded retries, no retry storm");
     let err = job.error.clone().unwrap();
     assert_eq!(err.kind, "transient");
-    assert!(err.message.contains("flaky"), "error detail preserved, got: {}", err.message);
+    assert!(
+        err.message.contains("flaky"),
+        "error detail preserved, got: {}",
+        err.message
+    );
 
     // Partial progress is never reported complete: no document was stored.
     let doc_id = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src://flaky");
@@ -608,10 +656,13 @@ async fn transient_provider_failure_retries_then_fails_loudly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn permanent_provider_failure_does_not_retry() {
     let dir = tmp("fail-permanent");
-    let provider: Arc<dyn EmbeddingProvider> = Arc::new(FlakyProvider::new(u32::MAX, FlakyMode::Permanent));
+    let provider: Arc<dyn EmbeddingProvider> =
+        Arc::new(FlakyProvider::new(u32::MAX, FlakyMode::Permanent));
     let (runner, _opener) = spawn_runner(&dir, Some(provider));
 
-    let id = runner.try_submit_ingest(ingest_req("src://bad", "bad request")).unwrap();
+    let id = runner
+        .try_submit_ingest(ingest_req("src://bad", "bad request"))
+        .unwrap();
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Failed);
     assert_eq!(job.attempts, 1, "permanent failures must not be retried");
@@ -622,10 +673,13 @@ async fn permanent_provider_failure_does_not_retry() {
 async fn transient_failure_then_success_recovers() {
     let dir = tmp("recover");
     // Fail twice transiently, then succeed.
-    let provider: Arc<dyn EmbeddingProvider> = Arc::new(FlakyProvider::new(2, FlakyMode::Transient));
+    let provider: Arc<dyn EmbeddingProvider> =
+        Arc::new(FlakyProvider::new(2, FlakyMode::Transient));
     let (runner, _opener) = spawn_runner(&dir, Some(provider));
 
-    let id = runner.try_submit_ingest(ingest_req("src://rec", "recovers")).unwrap();
+    let id = runner
+        .try_submit_ingest(ingest_req("src://rec", "recovers"))
+        .unwrap();
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Done);
     assert_eq!(job.attempts, 3, "two failures then success");
@@ -666,7 +720,9 @@ async fn queue_full_is_backpressure_not_silent_drop() {
 async fn ingest_without_provider_or_vectors_fails_fast() {
     let dir = tmp("no-provider");
     let (runner, _opener) = spawn_runner(&dir, None);
-    let id = runner.try_submit_ingest(ingest_req("src://np", "no one to embed")).unwrap();
+    let id = runner
+        .try_submit_ingest(ingest_req("src://np", "no one to embed"))
+        .unwrap();
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Failed);
     let msg = job.error.unwrap().message;
@@ -693,7 +749,14 @@ async fn supplied_vectors_need_no_provider() {
     let store = opener.raw(&CollectionId::new("kb").unwrap());
     let (_, chunks) = store.get_document(&doc_id).unwrap().unwrap();
     assert_eq!(chunks.len(), 1);
-    let hits = store.search(&provider.embed(&[chunks[0].text.as_str()]).unwrap().remove(0), 5, 32);
+    let hits = store.search(
+        &provider
+            .embed(&[chunks[0].text.as_str()])
+            .unwrap()
+            .remove(0),
+        5,
+        32,
+    );
     assert!(!hits.is_empty());
 }
 
@@ -715,13 +778,19 @@ async fn dimension_mismatch_is_rejected() {
     // Provider dim 16 vs collection dim 32.
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(StubEmbeddingProvider::new(16).unwrap());
     let (runner, opener) = spawn_runner(&dir, Some(provider));
-    let id = runner.try_submit_ingest(ingest_req("src://dim", "content")).unwrap();
+    let id = runner
+        .try_submit_ingest(ingest_req("src://dim", "content"))
+        .unwrap();
     let job = wait_done(&runner, &id).await;
     assert_eq!(job.state, JobState::Failed);
     assert!(job.error.unwrap().message.contains("dimension"),);
     let doc_id = DocumentId::for_source(&CollectionId::new("kb").unwrap(), "src://dim");
     assert!(
-        opener.raw(&CollectionId::new("kb").unwrap()).get_document(&doc_id).unwrap().is_none()
+        opener
+            .raw(&CollectionId::new("kb").unwrap())
+            .get_document(&doc_id)
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -741,7 +810,9 @@ async fn model_mismatch_is_rejected_after_first_claim() {
     assert!(runner.spawn(Arc::clone(&opener) as Arc<dyn CollectionOpener>));
 
     // First ingest claims the collection for the stub model.
-    let id1 = runner.try_submit_ingest(ingest_req("src://m1", "first model")).unwrap();
+    let id1 = runner
+        .try_submit_ingest(ingest_req("src://m1", "first model"))
+        .unwrap();
     assert_eq!(wait_done(&runner, &id1).await.state, JobState::Done);
 
     // A different model (same dimension) must be refused — never silently mixed.
@@ -749,9 +820,16 @@ async fn model_mismatch_is_rejected_after_first_claim() {
         stub: StubEmbeddingProvider::new(DIM).unwrap(),
     });
     let store2 = JobStore::open(&dir.join("jobs2.redb")).unwrap();
-    let runner2 = JobRunner::new(store2, Some(other), Arc::new(MarkitConverter::new()), test_limits());
+    let runner2 = JobRunner::new(
+        store2,
+        Some(other),
+        Arc::new(MarkitConverter::new()),
+        test_limits(),
+    );
     assert!(runner2.spawn(Arc::clone(&opener) as Arc<dyn CollectionOpener>));
-    let id2 = runner2.try_submit_ingest(ingest_req("src://m2", "second model")).unwrap();
+    let id2 = runner2
+        .try_submit_ingest(ingest_req("src://m2", "second model"))
+        .unwrap();
     let job2 = wait_done(&runner2, &id2).await;
     assert_eq!(job2.state, JobState::Failed);
     assert!(job2.error.unwrap().message.contains("model mismatch"));

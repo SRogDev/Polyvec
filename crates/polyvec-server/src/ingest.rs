@@ -43,7 +43,11 @@ pub fn build_provider(
         EmbeddingKind::Remote => {
             let provider = RemoteEmbeddingProvider::from_env()?;
             let tag = provider.model_id();
-            log::info!("embedding provider: remote '{}' version '{}'", tag.name, tag.version);
+            log::info!(
+                "embedding provider: remote '{}' version '{}'",
+                tag.name,
+                tag.version
+            );
             Ok(Some(Arc::new(provider)))
         }
     }
@@ -59,8 +63,7 @@ pub fn build_runner(
     config: &ServerConfig,
     provider: Option<Arc<dyn EmbeddingProvider>>,
 ) -> std::result::Result<JobRunner, String> {
-    let store =
-        JobStore::open(&config.data_dir.join("jobs.redb")).map_err(|e| e.to_string())?;
+    let store = JobStore::open(&config.data_dir.join("jobs.redb")).map_err(|e| e.to_string())?;
     Ok(JobRunner::new(
         store,
         provider,

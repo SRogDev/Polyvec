@@ -5,7 +5,10 @@
 //! `polyvec-embeddings` implements it.
 
 use polyvec_core::ModelTag;
-use polyvec_embeddings::{EmbedError, EmbeddingProvider, ErrorKind, RemoteEmbeddingProvider, StubEmbeddingProvider};
+use polyvec_embeddings::{
+    EmbedError, EmbeddingProvider, ErrorKind, RemoteEmbeddingProvider, StubEmbeddingProvider,
+};
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -106,12 +109,10 @@ fn mock_server(
             };
             let mut resp = format!("HTTP/1.1 {status} {reason}\r\n");
             for (k, v) in headers {
-                resp.push_str(&format!("{k}: {v}\r\n"));
+                let _ = writeln!(resp, "{k}: {v}\r");
             }
-            resp.push_str(&format!(
-                "Content-Length: {}\r\nConnection: close\r\n\r\n",
-                resp_body.len()
-            ));
+            let _ = writeln!(resp, "Content-Length: {}\r", resp_body.len());
+            resp.push_str("\r\n");
             stream.write_all(resp.as_bytes()).unwrap();
             stream.write_all(resp_body.as_bytes()).unwrap();
             hits2.fetch_add(1, Ordering::SeqCst);
@@ -126,8 +127,16 @@ fn embeddings_response(n: usize, dim: usize) -> String {
     let data: Vec<String> = (0..n)
         .map(|i| {
             let mut v = vec![0.0f32; dim];
-            v[0] = i as f32 * 0.25 + 0.5;
-            format!(r#"{{"embedding":[{}],"index":{i}}}"#, v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+            #[allow(clippy::cast_precision_loss)]
+            let first = i as f32 * 0.25 + 0.5;
+            v[0] = first;
+            format!(
+                r#"{{"embedding":[{}],"index":{i}}}"#,
+                v.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         })
         .collect();
     format!(r#"{{"data":[{}],"model":"mock"}}"#, data.join(","))
@@ -137,7 +146,7 @@ fn embeddings_response(n: usize, dim: usize) -> String {
 fn count_inputs(body: &str) -> usize {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("input").and_then(|i| i.as_array()).map(|a| a.len()))
+        .and_then(|v| v.get("input").and_then(|i| i.as_array()).map(Vec::len))
         .unwrap_or(0)
 }
 
@@ -160,14 +169,22 @@ fn remote_batches_and_preserves_order() {
         .unwrap()
         .with_batch_size(3);
     let texts: Vec<String> = (0..7).map(|i| format!("text {i}")).collect();
-    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let out = p.embed(&refs).unwrap();
     assert_eq!(out.len(), 7);
-    assert_eq!(hits.load(Ordering::SeqCst), 3, "must batch, not one-call-per-text");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        3,
+        "must batch, not one-call-per-text"
+    );
     for (i, v) in out.iter().enumerate() {
         assert_eq!(v.len(), 8);
         assert!(
-            (v[0] - (i_in_batch(i) as f32 * 0.25 + 0.5)).abs() < 1e-6,
+            {
+                #[allow(clippy::cast_precision_loss)]
+                let expect = i_in_batch(i) as f32 * 0.25 + 0.5;
+                (v[0] - expect).abs() < 1e-6
+            },
             "output order must match input order (input {i})"
         );
     }
@@ -203,7 +220,9 @@ fn remote_429_is_transient_with_retry_after() {
 
 #[test]
 fn remote_401_is_permanent() {
-    let (url, _) = mock_server(1, |_, _| (401, vec![], r#"{"error":"bad key"}"#.to_string()));
+    let (url, _) = mock_server(1, |_, _| {
+        (401, vec![], r#"{"error":"bad key"}"#.to_string())
+    });
     let p = RemoteEmbeddingProvider::new(url, "sekret", test_tag(), 8).unwrap();
     let err = p.embed(&["x"]).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Permanent);

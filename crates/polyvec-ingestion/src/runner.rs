@@ -47,9 +47,15 @@ use crate::jobs::{
 /// its per-collection `Mutex<CollectionStore>`.
 pub trait DocStore: Send + Sync {
     /// Snapshot of the collection config (dimension, model tag, chunking).
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the collection cannot be read.
     fn config(&self) -> Result<CollectionConfig>;
 
     /// Fetches a document and its chunks, if it exists.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the collection cannot be read.
     fn get_document(&self, id: &DocumentId) -> Result<Option<(Document, Vec<Chunk>)>>;
 
     /// Returns `true` when every chunk in `chunks` has a live
@@ -57,18 +63,32 @@ pub trait DocStore: Send + Sync {
     /// unchanged-content path to detect a partially-completed previous
     /// attempt (document stored, vectors missing) — without it, a retry
     /// would report "skipped" for a document with no searchable vectors.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the collection cannot be read.
     fn vectors_present(&self, chunks: &[Chunk]) -> Result<bool>;
 
     /// Writes a document version atomically: tombstones the previous
     /// version's vectors, removes its chunks, then stores the new
     /// document, chunks, and vectors.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the write fails; [`Error::AlreadyExists`] if a
+    /// live vector id collides (concurrent writer).
     fn ingest_document(&self, doc: &Document, chunks: &[Chunk], vectors: &[Vector]) -> Result<()>;
 
     /// Deletes a document, cascading to its chunks and their vectors.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the write fails.
     fn delete_document(&self, id: &DocumentId) -> Result<()>;
 
     /// Claims the collection for an embedding model (one-time). Fails if a
     /// *different* tag is already set; setting the same tag twice is a no-op.
+    ///
+    /// # Errors
+    /// [`Error::AlreadyExists`] if a different model tag is already set;
+    /// [`Error::Storage`] if the write fails.
     fn stamp_model_tag(&self, tag: &ModelTag) -> Result<()>;
 }
 
@@ -172,10 +192,9 @@ pub enum SubmitError {
 impl std::fmt::Display for SubmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SubmitError::QueueFull { retry_after_secs } => write!(
-                f,
-                "ingest queue is full; retry after {retry_after_secs}s"
-            ),
+            SubmitError::QueueFull { retry_after_secs } => {
+                write!(f, "ingest queue is full; retry after {retry_after_secs}s")
+            }
             SubmitError::ShuttingDown => write!(f, "ingest runner is shutting down"),
             SubmitError::Store(e) => write!(f, "job store: {e}"),
         }
@@ -329,23 +348,26 @@ impl JobRunner {
         let handle = tokio::spawn(async move {
             accept_loop(inner, rx, opener).await;
         });
-        *self
-            .inner
-            .accept_handle
-            .lock()
-            .expect("runner lock") = Some(handle);
+        *self.inner.accept_handle.lock().expect("runner lock") = Some(handle);
         true
     }
 
     /// Submits an ingest job without blocking. Duplicate in-flight
     /// submissions (same idempotency key) return the existing job id.
+    ///
+    /// # Errors
+    /// [`SubmitError::QueueFull`] when the bounded queue is full;
+    /// [`SubmitError::ShuttingDown`] after [`JobRunner::shutdown`];
+    /// [`SubmitError::Store`] on job-store failure.
+    ///
+    /// # Panics
+    /// Panics if the runner's internal mutex is poisoned.
     pub fn try_submit_ingest(&self, req: IngestRequest) -> std::result::Result<JobId, SubmitError> {
-        let key = req.idempotency_key.clone().unwrap_or_else(|| {
-            ingest_idempotency_key(&req.collection, &req.source, &req.content)
-        });
-        let max_attempts = req
-            .max_attempts
-            .unwrap_or(self.inner.limits.max_attempts);
+        let key = req
+            .idempotency_key
+            .clone()
+            .unwrap_or_else(|| ingest_idempotency_key(&req.collection, &req.source, &req.content));
+        let max_attempts = req.max_attempts.unwrap_or(self.inner.limits.max_attempts);
         let (job, created) = self
             .inner
             .store
@@ -361,20 +383,27 @@ impl JobRunner {
             .map_err(SubmitError::Store)?;
         let id = JobId::new(job.id.clone());
         if created {
-            self.enqueue(QueuedJob::Ingest { id: id.clone(), req })?;
+            self.enqueue(QueuedJob::Ingest {
+                id: id.clone(),
+                req,
+            })?;
         }
         Ok(id)
     }
 
     /// Submits a delete job without blocking.
+    ///
+    /// # Errors
+    /// Same as [`JobRunner::try_submit_ingest`].
+    ///
+    /// # Panics
+    /// Panics if the runner's internal mutex is poisoned.
     pub fn try_submit_delete(&self, req: DeleteRequest) -> std::result::Result<JobId, SubmitError> {
         let key = req
             .idempotency_key
             .clone()
             .unwrap_or_else(|| delete_idempotency_key(&req.collection, &req.source));
-        let max_attempts = req
-            .max_attempts
-            .unwrap_or(self.inner.limits.max_attempts);
+        let max_attempts = req.max_attempts.unwrap_or(self.inner.limits.max_attempts);
         let (job, created) = self
             .inner
             .store
@@ -390,21 +419,32 @@ impl JobRunner {
             .map_err(SubmitError::Store)?;
         let id = JobId::new(job.id.clone());
         if created {
-            self.enqueue(QueuedJob::Delete { id: id.clone(), req })?;
+            self.enqueue(QueuedJob::Delete {
+                id: id.clone(),
+                req,
+            })?;
         }
         Ok(id)
     }
 
     /// Fetches a job record by id.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] on job-store failure.
+    ///
+    /// # Panics
+    /// Panics if the runner's internal mutex is poisoned.
     pub fn get_job(&self, id: &JobId) -> Result<Option<IngestionJob>> {
-        self.inner
-            .store
-            .lock()
-            .expect("runner lock")
-            .get(id)
+        self.inner.store.lock().expect("runner lock").get(id)
     }
 
     /// Lists jobs for a collection, newest first.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] on job-store failure.
+    ///
+    /// # Panics
+    /// Panics if the runner's internal mutex is poisoned.
     pub fn list_jobs(&self, collection: &CollectionId, limit: usize) -> Result<Vec<IngestionJob>> {
         self.inner
             .store
@@ -417,16 +457,16 @@ impl JobRunner {
     /// finish. Jobs still queued are left `Pending` in the store — but their
     /// payloads are gone, so a restart marks them failed (see
     /// [`JobStore::open`]); resubmission is the remedy.
+    ///
+    /// # Panics
+    /// Panics if the runner's internal mutex is poisoned.
     pub async fn shutdown(&self) {
         // Stop accepting: dropping the sender closes the channel.
         self.inner.tx.lock().expect("runner lock").take();
-        if let Some(handle) = self
-            .inner
-            .accept_handle
-            .lock()
-            .expect("runner lock")
-            .take()
-        {
+        // Drop the guard before the await: holding a std MutexGuard across
+        // an await point stalls the executor.
+        let handle = self.inner.accept_handle.lock().expect("runner lock").take();
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
@@ -525,14 +565,14 @@ async fn run_with_retries(
         })
         .await;
         match outcome {
-            Ok(Outcome::Done) | Ok(Outcome::Failed) => break,
+            Ok(Outcome::Done | Outcome::Failed) => break,
             Ok(Outcome::RetryAfter(d)) => tokio::time::sleep(d).await,
             Err(join_err) => {
                 // The worker panicked: never report it as complete.
                 mark_failed(
                     inner,
                     &job_id,
-                    PipelineError::Permanent(format!("worker panic: {join_err}")),
+                    &PipelineError::Permanent(format!("worker panic: {join_err}")),
                 );
                 break;
             }
@@ -550,7 +590,7 @@ fn execute_once(
     let mut job = match inner.store.lock().expect("runner lock").get(job_id) {
         Ok(Some(j)) => j,
         Ok(None) => {
-            log::error!("ingest job {} vanished from the store; dropping", job_id);
+            log::error!("ingest job {job_id} vanished from the store; dropping");
             return Outcome::Failed;
         }
         Err(e) => {
@@ -585,15 +625,19 @@ fn execute_once(
             let budget_exhausted = job.attempts >= job.max_attempts;
             match e {
                 PipelineError::Permanent(_) => {
-                    mark_failed(inner, job_id, e);
+                    mark_failed(inner, job_id, &e);
                     Outcome::Failed
                 }
                 PipelineError::Transient { retry_after, .. } if budget_exhausted => {
-                    let msg = format!("{}; retry budget exhausted after {} attempts", e.message(), job.attempts);
+                    let msg = format!(
+                        "{}; retry budget exhausted after {} attempts",
+                        e.message(),
+                        job.attempts
+                    );
                     mark_failed(
                         inner,
                         job_id,
-                        PipelineError::Transient {
+                        &PipelineError::Transient {
                             message: msg,
                             retry_after,
                         },
@@ -620,10 +664,9 @@ fn execute_once(
 
 /// Records a terminal failure. Failed jobs stay failed — partial progress
 /// is visible in `affected` but never reported as complete.
-fn mark_failed(inner: &RunnerInner, job_id: &JobId, e: PipelineError) {
-    let mut job = match inner.store.lock().expect("runner lock").get(job_id) {
-        Ok(Some(j)) => j,
-        _ => return,
+fn mark_failed(inner: &RunnerInner, job_id: &JobId, e: &PipelineError) {
+    let Ok(Some(mut job)) = inner.store.lock().expect("runner lock").get(job_id) else {
+        return;
     };
     // Preserve partial progress if the pipeline recorded any.
     let affected = job.affected.clone();
@@ -677,8 +720,16 @@ fn run_ingest(
             .and_then(|f| f.rsplit_once('.'))
             .map(|(_, ext)| ext.to_string()),
     };
-    let converted = inner.converter.convert(&req.content, &hint).map_err(PipelineError::from)?;
-    let canonical = canonicalize(converted, &req.source, req.filename.as_deref(), &req.content);
+    let converted = inner
+        .converter
+        .convert(&req.content, &hint)
+        .map_err(PipelineError::from)?;
+    let canonical = canonicalize(
+        converted,
+        &req.source,
+        req.filename.as_deref(),
+        &req.content,
+    );
 
     // 2. Chunk (before change detection: the skip path needs chunk ids to
     //    verify the vectors actually made it).
@@ -692,7 +743,9 @@ fn run_ingest(
 
     // 3. Change detection: unchanged content (and chunking) → skip, unless
     //    a previous attempt stored the document without its vectors.
-    let existing = store.get_document(&document_id).map_err(PipelineError::from)?;
+    let existing = store
+        .get_document(&document_id)
+        .map_err(PipelineError::from)?;
     let prev = inner
         .store
         .lock()
@@ -717,14 +770,17 @@ fn run_ingest(
                 Chunk::new_versioned(
                     document_id.clone(),
                     version,
-                    i as u32,
+                    u32::try_from(i).unwrap_or(u32::MAX),
                     &r.text,
                     r.char_start,
                     r.char_end,
                 )
             })
             .collect();
-        if store.vectors_present(&chunks).map_err(PipelineError::from)? {
+        if store
+            .vectors_present(&chunks)
+            .map_err(PipelineError::from)?
+        {
             log::info!(
                 "ingest job {}: content unchanged, skipping (version {})",
                 job.id,
@@ -752,40 +808,39 @@ fn run_ingest(
 
     // 4. Vectors: supplied path or provider path (never silently mixed).
     let dim = config.dimension;
-    let vectors: Vec<Vec<f32>> = match &req.vectors {
-        Some(supplied) => {
-            if supplied.len() != raw.len() {
-                return Err(PipelineError::Permanent(format!(
-                    "supplied {} vectors for {} chunks; must align 1:1",
-                    supplied.len(),
-                    raw.len()
-                )));
-            }
-            supplied.clone()
+    let vectors: Vec<Vec<f32>> = if let Some(supplied) = &req.vectors {
+        if supplied.len() != raw.len() {
+            return Err(PipelineError::Permanent(format!(
+                "supplied {} vectors for {} chunks; must align 1:1",
+                supplied.len(),
+                raw.len()
+            )));
         }
-        None => {
-            let provider = inner.provider.as_ref().ok_or_else(|| {
-                PipelineError::Permanent(
-                    "no embedding provider configured and no supplied vectors; \
-                     set POLYVEC_EMBEDDING_PROVIDER or supply vectors"
-                        .to_string(),
-                )
-            })?;
-            if provider.dimension() != dim {
-                return Err(PipelineError::Permanent(format!(
-                    "provider dimension {} does not match collection dimension {dim}",
-                    provider.dimension()
-                )));
-            }
-            check_model_tag(&*store, &**provider)?;
-            let texts: Vec<&str> = raw.iter().map(|c| c.text.as_str()).collect();
-            provider.embed(&texts).map_err(PipelineError::from)?
+        supplied.clone()
+    } else {
+        let provider = inner.provider.as_ref().ok_or_else(|| {
+            PipelineError::Permanent(
+                "no embedding provider configured and no supplied vectors; \
+                 set POLYVEC_EMBEDDING_PROVIDER or supply vectors"
+                    .to_string(),
+            )
+        })?;
+        if provider.dimension() != dim {
+            return Err(PipelineError::Permanent(format!(
+                "provider dimension {} does not match collection dimension {dim}",
+                provider.dimension()
+            )));
         }
+        check_model_tag(&*store, &**provider)?;
+        let texts: Vec<&str> = raw.iter().map(|c| c.text.as_str()).collect();
+        provider.embed(&texts).map_err(PipelineError::from)?
     };
 
     // 5. Build the document version, chunks, and vectors.
     // (`version` was decided in step 3: bump on change, reuse on retry.)
-    let mut metadata = existing.as_ref().map_or_else(Metadata::default, |(d, _)| d.metadata.clone());
+    let mut metadata = existing
+        .as_ref()
+        .map_or_else(Metadata::default, |(d, _)| d.metadata.clone());
     for (k, v) in req.metadata.iter() {
         metadata.insert(k.clone(), v.clone());
     }
@@ -811,7 +866,7 @@ fn run_ingest(
         collection: req.collection.clone(),
         source: req.source.clone(),
         metadata,
-        content_hash: canonical.canonical_hash.clone(),
+        content_hash: canonical.canonical_hash,
         version,
         provenance: Provenance::Ingested {
             source: format!("job:{}", job.id),
@@ -825,7 +880,7 @@ fn run_ingest(
             Chunk::new_versioned(
                 document_id.clone(),
                 version,
-                i as u32,
+                u32::try_from(i).unwrap_or(u32::MAX),
                 &r.text,
                 r.char_start,
                 r.char_end,
@@ -834,15 +889,23 @@ fn run_ingest(
         .collect();
     let mut typed_vectors = Vec::with_capacity(vectors.len());
     for (chunk, values) in chunks.iter().zip(vectors) {
-        typed_vectors.push(Vector::new(VectorId::for_chunk(&chunk.id), values, dim).map_err(PipelineError::from)?);
+        typed_vectors.push(
+            Vector::new(VectorId::for_chunk(&chunk.id), values, dim)
+                .map_err(PipelineError::from)?,
+        );
     }
 
     // 6. Atomic store write: old version tombstoned, new version stored.
-    store.ingest_document(&doc, &chunks, &typed_vectors).map_err(PipelineError::from)?;
+    store
+        .ingest_document(&doc, &chunks, &typed_vectors)
+        .map_err(PipelineError::from)?;
 
     // 7. Durable provenance record.
-    inner.store.lock().expect("runner lock").put_doc_record(
-        &DocRecord {
+    inner
+        .store
+        .lock()
+        .expect("runner lock")
+        .put_doc_record(&DocRecord {
             document_id: document_id_str.clone(),
             collection: req.collection.as_str().to_string(),
             source: req.source.clone(),
@@ -853,8 +916,8 @@ fn run_ingest(
             converter: canonical.conversion.converter.clone(),
             source_format: canonical.source_format.clone(),
             filename: req.filename.clone(),
-        },
-    ).map_err(PipelineError::from)?;
+        })
+        .map_err(PipelineError::from)?;
 
     Ok(AffectedRecords {
         document_id: document_id_str,
@@ -876,7 +939,10 @@ fn run_delete(
     let store = opener.open(&req.collection).map_err(PipelineError::from)?;
     let document_id = DocumentId::for_source(&req.collection, &req.source);
     let document_id_str = document_id.as_str().to_string();
-    match store.get_document(&document_id).map_err(PipelineError::from)? {
+    match store
+        .get_document(&document_id)
+        .map_err(PipelineError::from)?
+    {
         None => Ok(AffectedRecords {
             document_id: document_id_str,
             version: 0,
@@ -885,12 +951,15 @@ fn run_delete(
             skipped: true,
         }),
         Some((doc, _)) => {
-            store.delete_document(&document_id).map_err(PipelineError::from)?;
+            store
+                .delete_document(&document_id)
+                .map_err(PipelineError::from)?;
             inner
                 .store
                 .lock()
                 .expect("runner lock")
-                .remove_doc_record(&document_id_str).map_err(PipelineError::from)?;
+                .remove_doc_record(&document_id_str)
+                .map_err(PipelineError::from)?;
             Ok(AffectedRecords {
                 document_id: document_id_str,
                 version: doc.version,
@@ -905,10 +974,7 @@ fn run_delete(
 /// Enforces the never-silently-mix-models rule: the provider's dimension and
 /// model tag must agree with the collection. An untagged collection is
 /// claimed (once, loudly) by the first model that writes to it.
-fn check_model_tag(
-    store: &dyn DocStore,
-    provider: &dyn EmbeddingProvider,
-) -> PipelineResult<()> {
+fn check_model_tag(store: &dyn DocStore, provider: &dyn EmbeddingProvider) -> PipelineResult<()> {
     let tag = provider.model_id();
     let config = store.config().map_err(PipelineError::from)?;
     match &config.model {

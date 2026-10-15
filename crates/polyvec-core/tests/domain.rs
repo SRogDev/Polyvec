@@ -370,26 +370,18 @@ fn chunking_config_default_and_validation() {
 
 #[test]
 fn collection_config_carries_chunking_with_serde_default() {
-    let cfg = CollectionConfig::new(
-        CollectionId::new("kb").unwrap(),
-        64,
-        DistanceMetric::Cosine,
-    )
-    .unwrap();
+    let cfg = CollectionConfig::new(CollectionId::new("kb").unwrap(), 64, DistanceMetric::Cosine)
+        .unwrap();
     assert_eq!(cfg.chunking, ChunkingConfig::default());
     let custom = ChunkingConfig {
         target_chars: 500,
         overlap_chars: 50,
         version: 2,
     };
-    let cfg2 = CollectionConfig::new(
-        CollectionId::new("kb").unwrap(),
-        64,
-        DistanceMetric::Cosine,
-    )
-    .unwrap()
-    .with_chunking(custom.clone())
-    .unwrap();
+    let cfg2 = CollectionConfig::new(CollectionId::new("kb").unwrap(), 64, DistanceMetric::Cosine)
+        .unwrap()
+        .with_chunking(custom.clone())
+        .unwrap();
     assert_eq!(cfg2.chunking, custom);
     // A config serialized without `chunking` (Phase 3 databases) must still
     // deserialize, falling back to the default.

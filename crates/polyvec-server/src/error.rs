@@ -164,10 +164,7 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let mut response = HttpResponse::build(self.status);
         if let Some(secs) = self.retry_after_secs {
-            response.insert_header((
-                actix_web::http::header::RETRY_AFTER,
-                secs.to_string(),
-            ));
+            response.insert_header((actix_web::http::header::RETRY_AFTER, secs.to_string()));
         }
         response.json(serde_json::json!({
             "error": {

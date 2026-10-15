@@ -569,6 +569,10 @@ pub struct IngestContentDto {
 
 impl IngestContentDto {
     /// Decodes to raw bytes, enforcing "exactly one of text/base64".
+    ///
+    /// # Errors
+    /// [`ApiError`] (400) when neither or both of `text`/`base64` are set,
+    /// or when `base64` is not valid base64.
     pub fn into_bytes(self) -> Result<Vec<u8>, ApiError> {
         match (self.text, self.base64) {
             (Some(text), None) => Ok(text.into_bytes()),
@@ -576,7 +580,9 @@ impl IngestContentDto {
                 use base64::Engine as _;
                 base64::engine::general_purpose::STANDARD
                     .decode(&encoded)
-                    .map_err(|e| ApiError::validation(format!("content.base64 is not valid base64: {e}")))
+                    .map_err(|e| {
+                        ApiError::validation(format!("content.base64 is not valid base64: {e}"))
+                    })
             }
             _ => Err(ApiError::validation(
                 "content must set exactly one of 'text' or 'base64'",

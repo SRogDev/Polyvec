@@ -48,7 +48,7 @@ impl std::fmt::Debug for RemoteEmbeddingProvider {
             .field("model", &self.model)
             .field("dimension", &self.dimension)
             .field("batch_size", &self.batch_size)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -201,7 +201,9 @@ impl RemoteEmbeddingProvider {
         let response = match response {
             Ok(r) => r,
             Err(e) if e.is_timeout() => {
-                return Err(EmbedError::transient(format!("embedding request timed out: {e}")));
+                return Err(EmbedError::transient(format!(
+                    "embedding request timed out: {e}"
+                )));
             }
             Err(e) => {
                 return Err(EmbedError::transient(format!(
