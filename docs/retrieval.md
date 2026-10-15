@@ -35,9 +35,11 @@ accepts `expand` for relationship-aware retrieval (Phase 6, below).
 - **Tokenization:** the default tokenizer only. No stemmers (dropped with
   `default-features = false`), no custom analyzers, no field boosts —
   tuning is follow-up work driven by measurements, not guesses.
-- **Query syntax:** tantivy's default query grammar (terms are ANDed;
-  `"quoted phrases"` match phrases; `+`/`-` are operators). A query the
-  grammar rejects is a `400 validation_error`, never a silent rewrite.
+- **Query syntax:** tantivy's default query grammar (bare terms are ORed —
+  tantivy's documented default: `happy tax payer` ≡ `happy OR tax OR payer`;
+  use `+term` to require a term, `-term` to exclude it; `"quoted phrases"`
+  match phrases). A query the grammar rejects is a `400 validation_error`,
+  never a silent rewrite.
 - **Threading:** tantivy work runs on Tokio's blocking pool (`web::block`),
   same as HNSW — never on async request workers.
 
