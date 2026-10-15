@@ -23,6 +23,8 @@ fn test_config(data_dir: PathBuf) -> ServerConfig {
         embedding: EmbeddingKind::None,
         job_queue_capacity: 16,
         job_concurrency: 2,
+        api_key: None,
+        rate_limit_rps: 0,
     }
 }
 
@@ -41,11 +43,12 @@ async fn test_app(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    let state = AppState::new(&test_config(data_dir)).expect("test app state");
+    let config = test_config(data_dir);
+    let state = AppState::new(&config).expect("test app state");
     awtest::init_service(
         App::new()
             .app_data(web::Data::new(state))
-            .configure(move |cfg| configure_routes(cfg, 8 * 1024)),
+            .configure(|cfg| configure_routes(cfg, &config)),
     )
     .await
 }

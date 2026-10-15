@@ -35,17 +35,19 @@ pub mod registry;
 pub mod retrieval;
 pub mod routes;
 pub mod schemas;
+pub mod security;
 
 use std::sync::Arc;
 
 use polyvec_embeddings::EmbeddingProvider;
 use polyvec_ingestion::{CollectionOpener, JobRunner};
 
-pub use config::{EmbeddingKind, ServerConfig};
+pub use config::{DEFAULT_RATE_LIMIT_RPS, EmbeddingKind, ServerConfig};
 pub use error::{ApiError, json_error_handler};
 pub use ingest::{ServerDocStore, ServerOpener, build_provider, build_runner};
 pub use registry::Registry;
 pub use routes::configure_routes;
+pub use security::{SecurityConfig, SecurityMiddleware};
 
 /// Maximum `k` accepted by the search endpoint.
 pub const MAX_K: usize = 1000;

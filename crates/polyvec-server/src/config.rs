@@ -15,6 +15,8 @@
 //! | `POLYVEC_STUB_DIMENSION` | `64` | Stub provider dimension (1–4096). The collection dimension must match. |
 //! | `POLYVEC_JOB_QUEUE_CAPACITY` | `64` | Ingest job queue capacity. Submits past capacity get `429` with `Retry-After`. |
 //! | `POLYVEC_JOB_CONCURRENCY` | `4` | Ingest jobs executed concurrently. |
+//! | `POLYVEC_API_KEY` | unset | Bearer token required on every `/v1` route (`Authorization: Bearer <key>`). Unset = no authentication (localhost-only default bind remains the protection). Empty string counts as unset. |
+//! | `POLYVEC_RATE_LIMIT_RPS` | `1000` | Sustained requests/second per client IP on `/v1` routes (burst = 4×). `0` disables rate limiting. |
 //!
 //! The remote embedding provider reads its own variables — see
 //! `polyvec_embeddings::RemoteEmbeddingProvider` (`POLYVEC_EMBEDDING_BASE_URL`,
@@ -36,6 +38,8 @@ pub const DEFAULT_STUB_DIMENSION: u32 = 64;
 pub const DEFAULT_JOB_QUEUE_CAPACITY: usize = 64;
 /// Default ingest job concurrency.
 pub const DEFAULT_JOB_CONCURRENCY: usize = 4;
+/// Default per-IP rate limit (requests/second); `0` disables.
+pub const DEFAULT_RATE_LIMIT_RPS: u32 = 1000;
 
 /// How text is embedded for ingestion and text queries.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,7 +59,10 @@ pub enum EmbeddingKind {
 }
 
 /// Runtime configuration of the HTTP server.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is implemented manually: the API key is redacted so it can
+/// never leak through a log line (see `SECURITY.md`).
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Address to bind.
     pub bind: SocketAddr,
@@ -73,6 +80,29 @@ pub struct ServerConfig {
     pub job_queue_capacity: usize,
     /// Ingest jobs executed concurrently.
     pub job_concurrency: usize,
+    /// Bearer token required on every `/v1` route (`None` = auth disabled;
+    /// the localhost-only default bind remains the protection then).
+    pub api_key: Option<String>,
+    /// Sustained requests/second per client IP on `/v1` routes
+    /// (`0` = rate limiting disabled).
+    pub rate_limit_rps: u32,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind", &self.bind)
+            .field("data_dir", &self.data_dir)
+            .field("json_limit", &self.json_limit)
+            .field("workers", &self.workers)
+            .field("allow_nonlocal_bind", &self.allow_nonlocal_bind)
+            .field("embedding", &self.embedding)
+            .field("job_queue_capacity", &self.job_queue_capacity)
+            .field("job_concurrency", &self.job_concurrency)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("rate_limit_rps", &self.rate_limit_rps)
+            .finish()
+    }
 }
 
 impl ServerConfig {
@@ -172,6 +202,19 @@ impl ServerConfig {
             return Err("POLYVEC_JOB_CONCURRENCY must be > 0".to_string());
         }
 
+        // Empty string counts as unset: an "empty key" would be worse than
+        // no key (it looks configured while matching nothing useful).
+        let api_key = get("POLYVEC_API_KEY")
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+
+        let rate_limit_rps = get("POLYVEC_RATE_LIMIT_RPS")
+            .map(str::parse::<u32>)
+            .transpose()
+            .map_err(|_| "POLYVEC_RATE_LIMIT_RPS must be a non-negative integer".to_string())?
+            .unwrap_or(DEFAULT_RATE_LIMIT_RPS);
+
         Ok(Self {
             bind,
             data_dir,
@@ -181,6 +224,8 @@ impl ServerConfig {
             embedding,
             job_queue_capacity,
             job_concurrency,
+            api_key,
+            rate_limit_rps,
         })
     }
 }
