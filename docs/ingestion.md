@@ -39,8 +39,10 @@ JobRunner (bounded mpsc queue, semaphore-bounded concurrency)
 ```
 
 Job status: `GET /v1/jobs/{job_id}`, `GET /v1/collections/{id}/jobs?limit=`.
-Text query: `POST /v1/collections/{id}/query {text, k, ef?}` — embeds via the
-configured provider, then vector search. `501` when no provider is configured.
+Text query: `POST /v1/collections/{id}/query {text, k, ef?, mode?, filter?, rrf_k?}`
+— retrieval modes (`vector` default, `lexical`, `hybrid`); see
+`docs/retrieval.md`. `501` when a vector-side mode has no provider
+configured.
 
 ## Supported formats (tested)
 
@@ -114,5 +116,3 @@ the endpoint sits behind a TLS-intercepting corporate proxy, set
 - Two ingests of the same source running concurrently: last-writer-wins;
   the loser's vector insert fails loudly (no silent corruption).
 - Job listing is a linear scan (fine for an operator-facing endpoint).
-- Query hits carry vector + chunk ids, not chunk text (retrieval of chunk
-  text is Phase 5).

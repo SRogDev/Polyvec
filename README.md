@@ -23,7 +23,7 @@ phase is done, execution is running):
 | 2 | Core domain + persistent vector database | done |
 | 3 | Server and public API (Actix Web) | done (PR #4) |
 | 4 | Canonical model + ingestion pipeline | done |
-| 5 | Lexical and hybrid retrieval | planned |
+| 5 | Lexical and hybrid retrieval | done |
 | 6 | Integrated relationship retrieval | planned |
 | 7 | Reliability, quality and performance | planned |
 | 8 | Documentation and AI-native DX | planned |
@@ -40,6 +40,7 @@ crates/polyvec-storage/   # redb-backed CollectionStore: catalog, persistence la
 crates/polyvec-server/    # Actix Web HTTP API: /v1 routes, schemas, config, graceful shutdown
 crates/polyvec-ingestion/ # ingestion pipeline: converter, canonical model, chunking, jobs
 crates/polyvec-embeddings/ # embedding provider trait, stub + remote HTTP adapters
+crates/polyvec-retrieval/  # lexical (tantivy) + hybrid (RRF) retrieval
 vendor/markit/            # vendored markit (pinned 4197c76a; HTTP stubbed, mimalloc removed)
 docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
@@ -90,6 +91,21 @@ transient/permanent classification, bounded queue → `429` backpressure).
 provider (`none|stub|remote`) and searches — `501` when unconfigured.
 Provider keys come from env only and never appear in logs or errors.
 See `docs/ingestion.md`.
+
+**Phase 5 in one paragraph:** `polyvec-retrieval` adds the lexical
+subsystem (tantivy 0.26.2, `default-features=false`, one index per
+collection) and Reciprocal Rank Fusion (`k=60` default, configurable).
+`POST /v1/collections/{id}/query` takes `mode`: `vector` (default — the
+Phase 4 behavior), `lexical` (BM25 over chunk text, needs no embedding
+provider), or `hybrid` (RRF over both rankings). Hits share one schema —
+`rank/id/score/score_kind/path` plus chunk text, source, document
+metadata, and provenance — with documented score semantics (scores are
+never comparable across modes). Ingestion jobs index chunk text right
+after the vector write in the same job; updates re-index and deletes
+scrub the index, so stale content never surfaces lexically; the index
+rebuilds from the catalog on every collection open. Exact-match metadata
+filters work identically in all three modes. Full semantics in
+`docs/retrieval.md`; live smoke test in `docs/e2e-retrieval.sh`.
 
 ## License
 

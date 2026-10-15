@@ -4,11 +4,27 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 4 branch `phase-4-ingestion`: canonical model + ingestion
-  pipeline complete; coordinator acceptance gate PASSED (build, 150 tests,
-  clippy -D warnings, fmt, cargo deny, live e2e 8/8). Ready to merge.
+- Phase 5 branch `phase-5-hybrid`: lexical + hybrid retrieval complete;
+  coordinator acceptance gate pending (build, tests, clippy -D warnings,
+  fmt, cargo deny, live e2e).
 
 ## Done
+- 2026-10-15 — **Phase 5 done**: lexical and hybrid retrieval. New crate
+  `polyvec-retrieval` (tantivy 0.26.2 `default-features=false` lexical
+  index per collection; Reciprocal Rank Fusion, k=60 default). Query API:
+  `mode` = `vector` (default, Phase 4 behavior) | `lexical` (BM25, no
+  provider needed) | `hybrid` (RRF); common result schema
+  (rank/id/score/score_kind/path + chunk text, source, metadata,
+  provenance; scores never comparable across modes). Ingestion jobs index
+  chunk text in the same job as vectors; updates re-index, deletes scrub
+  (updated/deleted content absent from lexical results, tested);
+  lexical index rebuilds from the catalog on every collection open.
+  Exact-match metadata filters behave consistently across modes.
+  `cargo deny check` green (foldhash/Zlib exception now documents the
+  tantivy→lru provenance; no new copyleft). Evidence: workspace tests
+  green incl. 8 new HTTP tests (hybrid fixture: lexical-wins +
+  vector-wins + RRF; filter consistency; stale-content absence; reopen
+  rebuild); `docs/retrieval.md` new; `docs/e2e-retrieval.sh` live script.
 - 2026-10-15 — **Phase 4 done**: canonical model and ingestion pipeline.
   New crates `polyvec-embeddings` (sync `EmbeddingProvider` trait with
   transient/permanent classification; deterministic stub for dev/test;
@@ -91,7 +107,6 @@
 - 2026-09-26 — Repo created (SRogDev/Polyvec).
 
 ## Next
-- Phase 4 — canonical model + ingestion pipeline: `polyvec-ingestion`
-  (canonical model, chunking, ingestion jobs, markit converter adapter) and
-  `polyvec-embeddings` (provider interface, adapters, batching, dimension
-  validation). Text-query-via-embedding endpoints land here, not before.
+- Phase 6 — integrated relationship retrieval: bounded graph retrieval
+  over document/chunk relationships (lives in `polyvec-retrieval`;
+  `relationship-aware` mode on the query API).
