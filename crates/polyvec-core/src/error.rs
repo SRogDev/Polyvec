@@ -89,6 +89,17 @@ pub enum Error {
         /// The violated invariant, with as much context as is available.
         detail: String,
     },
+
+    /// An embedding or conversion provider failed.
+    ///
+    /// Returned for failures in external provider calls: network errors,
+    /// authentication failures, rate limits, malformed provider responses.
+    /// The `detail` never carries secrets (API keys are never logged).
+    #[error("provider error: {detail}")]
+    Provider {
+        /// What failed, in plain language (underlying message included).
+        detail: String,
+    },
 }
 
 /// Convenience alias so signatures read `Result<T>` instead of

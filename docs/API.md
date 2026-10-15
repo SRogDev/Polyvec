@@ -98,11 +98,48 @@ curl -X DELETE 'localhost:8080/v1/collections/kb-main/documents/kb-main%23a1b2..
 concatenated chunk texts. `metadata` accepts flat string/number/boolean
 values only. DELETE cascades to chunks and their vectors.
 
-## Not in this phase
+## Ingestion (Phase 4)
 
-Text-query-via-embedding (`"query": "some text"` → embed → search) is
-**Phase 4** (`polyvec-embeddings` + `polyvec-ingestion`). It is deliberately
-not exposed here — there is no provider to embed with yet.
+```bash
+# Submit an ingest job: HTML bytes → markdown → chunks → vectors. 202.
+curl -X POST localhost:8080/v1/collections/kb-main/ingest \
+  -H 'content-type: application/json' \
+  -d '{"source":"https://example.com/guide",
+       "filename":"guide.html","mime":"text/html",
+       "content":{"base64":"PGgxPkhlbGxvPC9oMT4="},
+       "metadata":{"author":"roger"}}'
+# {"job_id":"job-00000001","state":"pending"}
+
+# Or inline text:
+#   "content":{"text":"# Hello\n\nworld"}
+
+# Or client-supplied vectors (no provider needed; 1:1 with chunks):
+#   "vectors":[[0.1,0.2,...],...]
+
+# Inspect the job (200; 404 for unknown jobs).
+curl localhost:8080/v1/jobs/job-00000001
+# {"job_id":"...","state":"done","attempts":1,...,
+#  "affected":{"document_id":"...","version":1,"chunks":3,"vectors":3,"skipped":false},
+#  "error":null}
+# Failed jobs keep {"kind":"transient"|"permanent","message":"...","attempt":N}.
+
+# List recent jobs for a collection (newest first; ?limit=, default 100, max 1000).
+curl 'localhost:8080/v1/collections/kb-main/jobs?limit=10'
+
+# Text query: embeds with the configured provider, then searches. 501 when
+# no provider is configured.
+curl -X POST localhost:8080/v1/collections/kb-main/query \
+  -H 'content-type: application/json' \
+  -d '{"text":"hello world","k":5}'
+# {"hits":[{"id":"...","distance":0.12,"chunk_id":"...#v1#c000000"}],"k":5,"ef":32}
+```
+
+Re-ingesting unchanged content returns `done` with `"skipped":true` — no new
+version, no new vectors. Changed content bumps the version and tombstones
+the old vectors immediately. Statuses: `429` (+ `Retry-After`) when the job
+queue is full; `501` (`unsupported`) when text ingest/query needs an embedding
+provider and none is configured — set `POLYVEC_EMBEDDING_PROVIDER=stub`
+(dev/test only) or `remote`, or supply `vectors`.
 
 ## Configuration
 
@@ -113,6 +150,18 @@ not exposed here — there is no provider to embed with yet.
 | `POLYVEC_JSON_LIMIT_BYTES` | `16777216` (16 MiB) | Max JSON body; larger → `413` |
 | `POLYVEC_WORKERS` | (CPU count) | HTTP worker threads |
 | `POLYVEC_ALLOW_NONLOCAL_BIND` | unset | Set to `1` to allow a non-loopback bind |
+| `POLYVEC_EMBEDDING_PROVIDER` | `none` | `none` \| `stub` (dev/test only) \| `remote` (OpenAI-compatible) |
+| `POLYVEC_STUB_DIMENSION` | `64` | Stub provider dimension (must match the collection) |
+| `POLYVEC_EMBEDDING_BASE_URL` | — | Remote endpoint base URL (required for `remote`) |
+| `POLYVEC_EMBEDDING_API_KEY` | — | Remote API key (env only, never logged) |
+| `POLYVEC_EMBEDDING_MODEL` | — | Remote model name (required; stamped as the collection's model tag) |
+| `POLYVEC_EMBEDDING_MODEL_VERSION` | `1` | Remote model version |
+| `POLYVEC_EMBEDDING_DIMENSION` | — | Expected embedding dimension (required) |
+| `POLYVEC_EMBEDDING_BATCH_SIZE` | `64` | Texts per HTTP call |
+| `POLYVEC_EMBEDDING_TIMEOUT_SECS` | `30` | Per-batch timeout |
+| `POLYVEC_JOB_QUEUE_CAPACITY` | `64` | Submit queue bound (`429` past this) |
+| `POLYVEC_JOB_CONCURRENCY` | `4` | Jobs running concurrently |
+| `POLYVEC_JOB_MAX_ATTEMPTS` | `5` | Attempt budget per job |
 
 Binding a non-loopback address without `POLYVEC_ALLOW_NONLOCAL_BIND=1`
 refuses to start. **Phase 3 has no authentication** — anyone who can reach

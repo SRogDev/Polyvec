@@ -508,3 +508,138 @@ fn put_document_overwrite_keeps_counters_honest() {
     assert_eq!(s.documents, 1, "documents counter inflated: {s:?}");
     assert_eq!(s.chunks, 3, "chunks counter wrong: {s:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4: atomic document ingest + model-tag stamping
+// ---------------------------------------------------------------------------
+
+fn make_versioned_doc(
+    version: u64,
+    texts: &[&str],
+    dim: usize,
+) -> (Document, Vec<Chunk>, Vec<Vector>) {
+    let collection = CollectionId::new("kb").unwrap();
+    let document_id = DocumentId::for_source(&collection, "src://phase4");
+    let doc = Document {
+        id: document_id.clone(),
+        collection: collection.clone(),
+        source: "src://phase4".to_string(),
+        metadata: Metadata::default(),
+        content_hash: ContentHash::of(format!("content-v{version}").as_bytes()),
+        version,
+        provenance: polyvec_core::Provenance::Ingested {
+            source: "phase4-test".to_string(),
+            at_secs: 0,
+        },
+    };
+    let chunks: Vec<Chunk> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            Chunk::new_versioned(
+                document_id.clone(),
+                version,
+                u32::try_from(i).unwrap(),
+                t,
+                0,
+                t.len(),
+            )
+        })
+        .collect();
+    let vectors: Vec<Vector> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            Vector::new(
+                VectorId::for_chunk(&c.id),
+                unit_vec(u64::try_from(i).unwrap() + version * 100, dim),
+                u32::try_from(dim).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    (doc, chunks, vectors)
+}
+
+#[test]
+fn ingest_document_stores_doc_chunks_and_vectors() {
+    let dir = tmp("ingest-basic");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    let (doc, chunks, vectors) = make_versioned_doc(1, &["alpha one", "alpha two"], 8);
+    store.ingest_document(&doc, &chunks, &vectors).unwrap();
+
+    let (got, got_chunks) = store.get_document(&doc.id).unwrap();
+    assert_eq!(got.version, 1);
+    assert_eq!(got_chunks.len(), 2);
+    assert_eq!(got_chunks[0].id, chunks[0].id);
+
+    // The chunk vectors are searchable immediately.
+    let hits = store.search(&vectors[0].values, 5, 32).unwrap();
+    assert!(
+        hits.iter().any(|h| h.vector_id == vectors[0].id),
+        "ingested vector must be searchable"
+    );
+    let stats = store.stats();
+    assert_eq!(stats.documents, 1);
+}
+
+#[test]
+fn ingest_document_new_version_tombstones_old_vectors() {
+    let dir = tmp("ingest-version");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    let (v1, chunks_v1, vectors_v1) = make_versioned_doc(1, &["alpha one", "alpha two"], 8);
+    store.ingest_document(&v1, &chunks_v1, &vectors_v1).unwrap();
+    let old_chunk_ids: Vec<_> = chunks_v1.iter().map(|c| c.id.clone()).collect();
+
+    // v2 with changed content: same document id, bumped version.
+    let (v2, chunks_v2, vectors_v2) = make_versioned_doc(2, &["beta one", "beta two"], 8);
+    assert_eq!(v2.id, v1.id);
+    store.ingest_document(&v2, &chunks_v2, &vectors_v2).unwrap();
+
+    let (got, got_chunks) = store.get_document(&v2.id).unwrap();
+    assert_eq!(got.version, 2, "version must bump");
+    assert_eq!(got_chunks.len(), 2);
+    assert!(
+        got_chunks.iter().all(|c| !old_chunk_ids.contains(&c.id)),
+        "old chunks must be replaced"
+    );
+
+    // Old vectors are tombstoned: unsearchable immediately.
+    let hits = store.search(&vectors_v1[0].values, 10, 32).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.vector_id == vectors_v1[0].id),
+        "old version vectors must be tombstoned, got {:?}",
+        hits.iter().map(|h| &h.vector_id).collect::<Vec<_>>()
+    );
+    assert!(
+        !hits.iter().any(|h| h.vector_id == vectors_v1[1].id),
+        "all old version vectors must be tombstoned"
+    );
+    // New vectors are searchable.
+    let hits = store.search(&vectors_v2[0].values, 10, 32).unwrap();
+    assert!(hits.iter().any(|h| h.vector_id == vectors_v2[0].id));
+}
+
+#[test]
+fn stamp_model_tag_claims_collection_once() {
+    let dir = tmp("stamp-tag");
+    let mut store = CollectionStore::create(&dir, test_config(8)).unwrap();
+    assert!(store.config().model.is_none());
+
+    let tag_a = polyvec_core::ModelTag::new("e5", "1.0").unwrap();
+    store.stamp_model_tag(&tag_a).unwrap();
+    assert_eq!(store.config().model.as_ref().unwrap().name, "e5");
+
+    // Same tag again: no-op.
+    store.stamp_model_tag(&tag_a).unwrap();
+
+    // Different tag: refused — never silently mix models.
+    let tag_b = polyvec_core::ModelTag::new("other", "1.0").unwrap();
+    let err = store.stamp_model_tag(&tag_b).unwrap_err();
+    assert!(matches!(err, Error::AlreadyExists { .. }), "got {err:?}");
+
+    // The claim survives reopen.
+    drop(store);
+    let (store, _) = CollectionStore::open(&dir).unwrap();
+    assert_eq!(store.config().model.as_ref().unwrap().name, "e5");
+}

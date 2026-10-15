@@ -8,7 +8,10 @@
 //!   The same source identity in the same collection always maps to the same
 //!   document, which is what makes re-ingestion idempotent.
 //! * [`ChunkId`] — derived: `{document}#c{index:06}`. Chunk `i` of a document
-//!   is always the same chunk.
+//!   is always the same chunk. Version-scoped variant `{document}#v{version}`
+//!   `#c{index:06}` (see [`ChunkId::for_versioned_index`]) gives each document
+//!   version fresh chunk ids so old vectors can be tombstoned without id
+//!   collisions.
 //! * [`VectorId`] — derived: `{chunk}#v` for chunk embeddings (one vector per
 //!   chunk in Phase 2).
 //!
@@ -137,6 +140,16 @@ impl ChunkId {
         Self(format!("{}#c{index:06}", document.as_str()))
     }
 
+    /// Derives the stable id for chunk `index` of `version` of `document`.
+    ///
+    /// Version-scoped: re-ingesting changed content bumps the document
+    /// version and yields fresh chunk ids, so the old version's vectors can
+    /// be tombstoned without id collisions with the new version's vectors.
+    #[must_use]
+    pub fn for_versioned_index(document: &DocumentId, version: u64, index: u32) -> Self {
+        Self(format!("{}#v{version}#c{index:06}", document.as_str()))
+    }
+
     /// Parses a previously derived id, validating its shape.
     ///
     /// # Errors
@@ -159,6 +172,15 @@ impl VectorId {
     #[must_use]
     pub fn for_chunk(chunk: &ChunkId) -> Self {
         Self(format!("{}#v", chunk.as_str()))
+    }
+
+    /// Recovers the chunk id this vector was derived from.
+    ///
+    /// Returns `None` unless the id has the `{chunk}#v` shape produced by
+    /// [`VectorId::for_chunk`].
+    #[must_use]
+    pub fn chunk_id(&self) -> Option<ChunkId> {
+        self.0.strip_suffix("#v").map(|s| ChunkId(s.to_string()))
     }
 
     /// Parses a previously derived id, validating its shape.
