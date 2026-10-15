@@ -146,7 +146,18 @@ impl Server {
 
     /// First chunk (id, text) of a document.
     fn first_chunk(&self, collection: &str, doc_id: &str) -> (String, String) {
-        let (status, body) = self.get(&format!("/v1/collections/{collection}/documents/{doc_id}"));
+        // Document ids contain '#': percent-encode for the path.
+        let encoded: String = doc_id
+            .chars()
+            .flat_map(|c| {
+                if c == '#' {
+                    "%23".chars().collect::<Vec<_>>()
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        let (status, body) = self.get(&format!("/v1/collections/{collection}/documents/{encoded}"));
         assert_eq!(status, 200, "get document: {body}");
         let chunk = &body["chunks"][0];
         (

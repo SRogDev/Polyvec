@@ -29,9 +29,20 @@ pub fn dir_size_bytes(dir: &Path) -> u64 {
 /// Peak resident set size (`VmHWM`) of this process in KiB, Linux-only.
 #[must_use]
 pub fn peak_rss_kib() -> Option<u64> {
+    rss_field("VmHWM:")
+}
+
+/// Current resident set size (`VmRSS`) of this process in KiB, Linux-only.
+/// Unlike the peak, this can go down — use it for before/after deltas.
+#[must_use]
+pub fn rss_kib() -> Option<u64> {
+    rss_field("VmRSS:")
+}
+
+fn rss_field(prefix: &str) -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmHWM:") {
+        if let Some(rest) = line.strip_prefix(prefix) {
             return rest.split_whitespace().next()?.parse::<u64>().ok();
         }
     }

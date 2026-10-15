@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use polyvec_bench::fixtures::Rng;
-use polyvec_bench::measure::{dir_size_bytes, peak_rss_kib, recall_at_k};
+use polyvec_bench::measure::{dir_size_bytes, recall_at_k, rss_kib};
 use polyvec_core::{DistanceMetric, Vector, VectorId};
 use polyvec_index::ExactIndex;
 use polyvec_storage::CollectionStore;
@@ -56,9 +56,49 @@ fn bench_bulk_insert(n: usize, dim: usize, seed: u64) -> Value {
     })
 }
 
+/// A5: RAM per vector — `VmRSS` delta across building 20k vectors and
+/// inserting+flushing them. Approximate (allocator retention); the
+/// delta is index + catalog + retained vector bytes.
+/// Returns the measurement and the collection dir (reused for A6 disk).
+fn bench_ram_per_vector() -> (Value, std::path::PathBuf) {
+    let dir = scratch("ram");
+    let rss_before = rss_kib();
+    let vectors = typed_vectors(20_000, 64, 0xA8);
+    let mut store = CollectionStore::create(&dir, test_config(64)).unwrap();
+    store.insert_vectors(vectors).unwrap();
+    store.flush().unwrap();
+    let rss_after = rss_kib();
+    let ram_per_vec = match (rss_before, rss_after) {
+        (Some(b), Some(a)) => {
+            #[allow(clippy::cast_precision_loss)]
+            let per = (a.saturating_sub(b)) as f64 * 1024.0 / 20_000.0;
+            json!({"bytes_per_vector": per, "rss_before_kib": b, "rss_after_kib": a})
+        }
+        _ => json!({"bytes_per_vector": Value::Null, "note": "VmRSS unavailable (non-Linux?)"}),
+    };
+    (ram_per_vec, dir)
+}
+
+/// A6: disk per vector after flush (reuses the A5 collection dir).
+fn bench_disk_per_vector(dir: &std::path::Path) -> Value {
+    let bytes = dir_size_bytes(dir);
+    #[allow(clippy::cast_precision_loss)]
+    let disk_per_vec = bytes as f64 / 20_000.0;
+    json!({"bytes_per_vector": disk_per_vec, "total_bytes": bytes, "n": 20_000})
+}
+
 #[allow(clippy::too_many_lines)] // one measurement per block; split would obscure the layer
 fn layer_a() -> Value {
     let mut out = Map::new();
+
+    // A5 first: RAM per vector needs a clean heap baseline, before the
+    // bulk inserts retain hundreds of MB in the allocator.
+    let (ram_json, ram_dir) = bench_ram_per_vector();
+    out.insert("ram_per_vector".to_string(), ram_json);
+    out.insert(
+        "disk_per_vector".to_string(),
+        bench_disk_per_vector(&ram_dir),
+    );
 
     // A1: bulk insert throughput (two sizes).
     out.insert(
@@ -148,6 +188,9 @@ fn layer_a() -> Value {
     }
     #[allow(clippy::cast_precision_loss)]
     let qps_1t = queries.len() as f64 / t0.elapsed().as_secs_f64();
+    // 8 threads through one Mutex<CollectionStore>: the server's actual
+    // shape (per-collection lock), so this measures contention, not
+    // lock-free scaling.
     let store = Arc::new(Mutex::new(store));
     let barrier = Arc::new(std::sync::Barrier::new(9));
     let t0 = Instant::now();
@@ -176,38 +219,16 @@ fn layer_a() -> Value {
         "search_qps".to_string(),
         json!({
             "n": 10_000, "dim": 64, "k": 10, "ef": 200,
-            "queries": 2000, "qps_1_thread": qps_1t, "qps_8_threads": qps_8t,
+            "queries": 2000, "qps_1_thread": qps_1t,
+            "qps_8_threads": qps_8t,
+            "note_8t": "8 threads share one Mutex<CollectionStore> — the server's per-collection lock shape; measures contention, not lock-free scaling",
         }),
     );
-
-    // A5: RAM per vector — peak-RSS delta across insert+flush of 20k vectors.
-    // (Raw vector bytes are caller-owned before insert; the delta is
-    // index + catalog overhead.)
-    let dir = scratch("ram");
-    let vectors = typed_vectors(20_000, 64, 0xA8);
-    let rss_before = peak_rss_kib();
-    let mut store = CollectionStore::create(&dir, test_config(64)).unwrap();
-    store.insert_vectors(vectors).unwrap();
-    store.flush().unwrap();
-    let rss_after = peak_rss_kib();
-    let ram_per_vec = match (rss_before, rss_after) {
-        (Some(b), Some(a)) => {
-            #[allow(clippy::cast_precision_loss)]
-            let per = (a.saturating_sub(b)) as f64 * 1024.0 / 20_000.0;
-            json!({"bytes_per_vector": per, "rss_before_kib": b, "rss_after_kib": a})
-        }
-        _ => json!({"bytes_per_vector": Value::Null, "note": "VmHWM unavailable (non-Linux?)"}),
-    };
-    out.insert("ram_per_vector".to_string(), ram_per_vec);
-
-    // A6: disk per vector after flush.
-    let bytes = dir_size_bytes(&dir);
-    #[allow(clippy::cast_precision_loss)]
-    let disk_per_vec = bytes as f64 / 20_000.0;
-    out.insert(
-        "disk_per_vector".to_string(),
-        json!({"bytes_per_vector": disk_per_vec, "total_bytes": bytes, "n": 20_000}),
-    );
+    // Recover the store from the Arc: the QPS threads are all joined.
+    let mut store = Arc::try_unwrap(store)
+        .unwrap_or_else(|_| panic!("QPS Arc still shared"))
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // A7: update + delete cost (1000 ops each), then rebuild time.
     let t0 = Instant::now();
@@ -279,6 +300,12 @@ fn main() {
 
 async fn async_main() {
     let t_start = Instant::now();
+    // BENCH_LAYERS="a,b,c" (default all): run a subset while debugging.
+    let only: Vec<String> = std::env::var("BENCH_LAYERS")
+        .unwrap_or_else(|_| "a,b,c".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
     let mut report = Map::new();
     report.insert(
         "meta".to_string(),
@@ -286,14 +313,21 @@ async fn async_main() {
             "date": civil_date(),
             "git_sha": git_sha(),
             "hardware": hardware(),
+            "layers_run": only,
         }),
     );
-    report.insert("layer_a_vector_engine".to_string(), layer_a());
-    report.insert(
-        "layer_b_knowledge_pipeline".to_string(),
-        layer_b::layer_b().await,
-    );
-    report.insert("layer_c_end_to_end".to_string(), layer_c::layer_c());
+    if only.iter().any(|l| l == "a") {
+        report.insert("layer_a_vector_engine".to_string(), layer_a());
+    }
+    if only.iter().any(|l| l == "b") {
+        report.insert(
+            "layer_b_knowledge_pipeline".to_string(),
+            layer_b::layer_b().await,
+        );
+    }
+    if only.iter().any(|l| l == "c") {
+        report.insert("layer_c_end_to_end".to_string(), layer_c::layer_c());
+    }
     report.insert(
         "report_wall_seconds".to_string(),
         json!(t_start.elapsed().as_secs_f64()),
@@ -304,6 +338,8 @@ async fn async_main() {
     );
     // Let stdout flush before exit.
     std::thread::sleep(Duration::from_millis(100));
+    // Don't leave gigabytes of scratch collections in /tmp.
+    common::cleanup_scratch();
 }
 
 /// `YYYY-MM-DD` without a date dependency (Howard Hinnant's algorithm).

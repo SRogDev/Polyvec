@@ -1,0 +1,191 @@
+{
+  "meta": {
+    "date": "2026-10-15",
+    "git_sha": "626e215b28e0a9a27622d499ae5e336003f9ca79",
+    "hardware": {
+      "cpu_model": "AMD EPYC 9D25 126-Core Processor",
+      "cpu_threads": 2,
+      "mem_total_kb": 8125588,
+      "os": "linux"
+    },
+    "layers_run": [
+      "a",
+      "b",
+      "c"
+    ]
+  },
+  "layer_a_vector_engine": {
+    "bulk_insert_10k_dim64": {
+      "n": 10000,
+      "dim": 64,
+      "seed": 161,
+      "seconds": 11.429233693,
+      "vectors_per_sec": 874.9492983177555
+    },
+    "bulk_insert_50k_dim128": {
+      "n": 50000,
+      "dim": 128,
+      "seed": 162,
+      "seconds": 181.549900564,
+      "vectors_per_sec": 275.40637502235364
+    },
+    "flush_10k_sec": 0.054842523,
+    "recall_at_10": {
+      "n": 2000,
+      "dim": 64,
+      "k": 10,
+      "ef": 200,
+      "queries": 50,
+      "seed": "0xA4/0xA5",
+      "mean": 1.0,
+      "min": 1.0
+    },
+    "search_qps": {
+      "n": 10000,
+      "dim": 64,
+      "k": 10,
+      "ef": 200,
+      "queries": 2000,
+      "qps_1_thread": 421.61707787716347,
+      "qps_8_threads": 429.735463488508,
+      "note_8t": "8 threads share one Mutex<CollectionStore> — the server's per-collection lock shape; measures contention, not lock-free scaling"
+    },
+    "ram_per_vector": {
+      "bytes_per_vector": 0.0,
+      "rss_before_kib": 367108,
+      "rss_after_kib": 367108
+    },
+    "disk_per_vector": {
+      "bytes_per_vector": 2724.8538,
+      "total_bytes": 54497076,
+      "n": 20000
+    },
+    "update_delete_rebuild": {
+      "update_avg_us": 4208.858,
+      "delete_avg_us": 88.408,
+      "flush_after_1k_deletes_sec": 0.089864005,
+      "explicit_rebuild_19k_live_sec": 32.983986426
+    },
+    "recovery_rebuild_on_open": {
+      "seconds": 33.753723686,
+      "recovery": "RebuiltFromCatalog { reason: \"no sidecar found\" }",
+      "live_vectors_after": 20000
+    }
+  },
+  "layer_b_knowledge_pipeline": {
+    "convert_by_format": [
+      {
+        "format": "markdown",
+        "success": true,
+        "seconds": 0.000158178,
+        "markdown_chars": 668,
+        "source_format": "md"
+      },
+      {
+        "format": "plain text",
+        "success": true,
+        "seconds": 4.246e-6,
+        "markdown_chars": 351,
+        "source_format": "txt"
+      },
+      {
+        "format": "html",
+        "success": true,
+        "seconds": 0.000455924,
+        "markdown_chars": 186,
+        "source_format": "html"
+      }
+    ],
+    "pipeline_per_doc": {
+      "documents": 20,
+      "seconds_total": 0.014893493,
+      "seconds_per_doc": 0.0007446746500000001,
+      "stages": {
+        "convert_avg_ms": 0.1010605,
+        "canonicalize_avg_ms": 0.00758625,
+        "chunk_avg_ms": 0.01366335,
+        "embed_stub_avg_ms": 0.00450975,
+        "store_write_avg_ms": 0.6178548
+      },
+      "note": "excludes job queueing, lexical-index write, doc-record write (see runner measurements)"
+    },
+    "runner": {
+      "ingest_job_per_doc": {
+        "attempts": 1,
+        "seconds": 0.05244702,
+        "state": "Done",
+        "affected": {
+          "document_id": "kb#aa41ad7540656b28112cc4db",
+          "version": 1,
+          "chunks": 1,
+          "vectors": 1,
+          "skipped": false
+        }
+      },
+      "reingest_skip": {
+        "seconds": 0.002261853,
+        "attempts": 1,
+        "state": "Done",
+        "affected": {
+          "document_id": "kb#aa41ad7540656b28112cc4db",
+          "version": 1,
+          "chunks": 0,
+          "vectors": 0,
+          "skipped": true
+        }
+      },
+      "update_propagates": {
+        "seconds": 0.051937927,
+        "state": "Done",
+        "affected": {
+          "document_id": "kb#aa41ad7540656b28112cc4db",
+          "version": 2,
+          "chunks": 1,
+          "vectors": 1,
+          "skipped": false
+        }
+      },
+      "delete_propagates": {
+        "seconds": 0.051452298,
+        "document_gone": true,
+        "live_vectors_after": 0,
+        "search_hits_after_delete": 0
+      },
+      "retry_transient_then_success": {
+        "scripted_transient_failures": 2,
+        "attempts": 3,
+        "seconds": 3.071103782,
+        "state": "Done",
+        "note": "attempts==3 and ~3s backoff (1s+2s) expected"
+      },
+      "retry_permanent_fails_fast": {
+        "attempts": 1,
+        "seconds": 0.052079539,
+        "state": "Failed",
+        "note": "attempts==1 expected: permanent errors are never retried"
+      }
+    }
+  },
+  "layer_c_end_to_end": {
+    "time_to_first_useful_result_sec": {
+      "seconds": 0.103891547,
+      "expected_chunk_rank_1": true
+    },
+    "self_query_retrieval": {
+      "queries": 30,
+      "k": 5,
+      "mrr": 1.0,
+      "recall_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "rank_1_count": 30,
+      "query_p50_ms": 0.776805,
+      "evidence_violations": 0,
+      "note": "queries are exact chunk texts; rank 1 expected by construction (stub provider is a hash). Mechanics check only."
+    },
+    "restart_durability": {
+      "graceful_sigterm_exit": true,
+      "corpus_searchable_after_restart": true
+    }
+  },
+  "report_wall_seconds": 347.08553998
+}

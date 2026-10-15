@@ -14,15 +14,23 @@ use polyvec_bench::fixtures::unit_vectors;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Fresh scratch directory (unique per call).
+/// Parent scratch dir for this run; removed (best-effort) at the end of
+/// the report so repeated runs don't fill `/tmp`.
+pub fn scratch_root() -> PathBuf {
+    std::env::temp_dir().join(format!("polyvec-benchrep-{}", std::process::id()))
+}
+
 pub fn scratch(name: &str) -> PathBuf {
     let n = SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "polyvec-benchrep-{name}-{pid}-{n}",
-        pid = std::process::id()
-    ));
+    let dir = scratch_root().join(format!("{name}-{n}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Best-effort cleanup of this run's scratch tree.
+pub fn cleanup_scratch() {
+    let _ = std::fs::remove_dir_all(scratch_root());
 }
 
 /// Standard benchmark collection config (cosine, default HNSW params).
