@@ -18,16 +18,16 @@ phase is done, execution is running):
 
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
-| 0 | Repository & architecture foundation | in progress |
-| 1 | Crate audit (index / storage / HTTP / embedding candidates) | next |
-| 2 | Vector index (HNSW et al., bounded graph retrieval) | planned |
-| 3 | Durable segment storage + manifest + WAL | planned |
-| 4 | Embedding provider adapters (pluggable) | planned |
-| 5 | Actix Web HTTP API | planned |
-| 6 | Server binary (wiring, config, graceful shutdown) | planned |
-| 7 | Benchmark harnesses + first measured results | planned |
-| 8 | Astro Starlight docs site | planned |
-| 9 | MVP acceptance: self-hosted engine, measured read path | planned |
+| 0 | Repository & architecture foundation | done (PR #3) |
+| 1 | Crate audit + persistence/index prototype | done |
+| 2 | Core domain + persistent vector database | next |
+| 3 | Server and public API (Actix Web) | planned |
+| 4 | Canonical model + ingestion pipeline | planned |
+| 5 | Lexical and hybrid retrieval | planned |
+| 6 | Integrated relationship retrieval | planned |
+| 7 | Reliability, quality and performance | planned |
+| 8 | Documentation and AI-native DX | planned |
+| 9 | MVP release | planned |
 
 Progress is tracked in `STATUS.md`; each phase ships as its own PR.
 

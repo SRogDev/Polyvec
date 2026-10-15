@@ -1,0 +1,10 @@
+[package]
+name = "convert_markit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# vendored shallow clone of shift-labs-ai/markit (rust/ subdir);
+# default-features=false deselects the clap CLI bin -> pure Rust rlib
+markit = { path = "../../vendor/markit-src/rust", default-features = false }
+anyhow = "1"

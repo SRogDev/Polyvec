@@ -1,0 +1,8 @@
+[package]
+name = "store_redb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redb = "4.4.0"
+anyhow = "1"
