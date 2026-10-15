@@ -25,8 +25,8 @@ phase is done, execution is running):
 | 4 | Canonical model + ingestion pipeline | done |
 | 5 | Lexical and hybrid retrieval | done |
 | 6 | Integrated relationship retrieval | done |
-| 7 | Reliability, quality and performance | done (this branch) |
-| 8 | Documentation and AI-native DX | planned |
+| 7 | Reliability, quality and performance | done |
+| 8 | Documentation and AI-native DX | in progress |
 | 9 | MVP release | planned |
 
 Progress is tracked in `STATUS.md`; each phase ships as its own PR.

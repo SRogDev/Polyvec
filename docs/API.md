@@ -283,8 +283,10 @@ provider and none is configured — set `POLYVEC_EMBEDDING_PROVIDER=stub`
 | `POLYVEC_JOB_MAX_ATTEMPTS` | `5` | Attempt budget per job |
 
 Binding a non-loopback address without `POLYVEC_ALLOW_NONLOCAL_BIND=1`
-refuses to start. **Phase 3 has no authentication** — anyone who can reach
-the socket has full read/write/delete. Keep it on localhost, or put it
+refuses to start. Without `POLYVEC_API_KEY`, anyone who can reach the
+socket has full read/write/delete — the same posture as Phase 3. Set
+`POLYVEC_API_KEY` to require a bearer token on every `/v1` route (see
+"Authentication & rate limiting" above), or keep the server on localhost
 behind a reverse proxy / firewall you trust. See `SECURITY.md`.
 
 ## Durability & shutdown

@@ -27,18 +27,21 @@ Polyvec/
 │   ├── polyvec-ingestion/      # Phase 4. Canonical model, chunking, jobs.
 │   ├── polyvec-embeddings/     # Phase 4. Provider trait, stub + remote adapters.
 │   └── polyvec-retrieval/      # Phase 5. tantivy lexical index, RRF fusion.
+│   └── polyvec-bench/          # Phase 7. fixtures, Criterion benches, bench_report.
+├── vendor/markit/              # vendored markit (pinned 4197c76a, HTTP stubbed — Phase 4)
 ├── docs/
 │   ├── PROJECT_BRIEF.md        # full context handoff for another AI
-│   ├── API.md                  # HTTP API reference + curl examples (Phase 5)
-│   ├── retrieval.md            # retrieval modes, scores, filters, failure behavior (Phase 5)
+│   ├── API.md                  # HTTP API reference + curl examples
+│   ├── ingestion.md            # ingestion pipeline + cost-guard mechanisms
+│   ├── retrieval.md            # retrieval modes, scores, filters, failure behavior
 │   ├── e2e.sh                  # runnable end-to-end smoke test (Phase 3)
 │   ├── decisions/              # ADRs (ADR-001 … ADR-004)
 │   ├── audit/                 # crate & license audit reports (Phase 1+)
 │   └── research/               # pre-plan landscape research
 ├── ARCHITECTURE.md             # this file
-├── BENCHMARKS.md               # benchmark methodology (results: not measured yet)
+├── BENCHMARKS.md               # benchmark methodology + measured results (Phase 7)
 ├── CONTRIBUTING.md
-├── SECURITY.md                 # policy + Phase 3 HTTP threat model
+├── SECURITY.md                 # policy + Phase 3 HTTP threat model + Phase 7 security delta
 ├── SaaS.md                     # future SaaS requirements — notes only, not built
 └── .github/workflows/ci.yml    # local-only until token scope is resolved
 ```

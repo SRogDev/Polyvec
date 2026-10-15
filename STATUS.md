@@ -4,8 +4,10 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- (none — Phase 7 complete on branch `phase-7-harden`, awaiting coordinator
-  review/PR)
+- Phase 8 — documentation and AI-native DX (branch `phase-8-docs`): docs
+  site, versioned AI integration prompt with a live end-to-end test,
+  docs consistency sweep. Pending Roger: Vercel project creation (the
+  Vercel connection is degraded; the site ships deploy-ready).
 
 ## Done
 - 2026-10-15 — **Phase 7 done** (branch `phase-7-harden`, 6 commits):
@@ -153,7 +155,5 @@
 - 2026-09-26 — Repo created (SRogDev/Polyvec).
 
 ## Next
-- Phase 7 — reliability, quality and performance (plan §15/§16): fill
-  test gaps (concurrency, crash-during-write), auth/rate-limit decision,
-  benchmark harness + honest BENCHMARKS.md. See
-  `~/workspace/polyvec-build/phase7-plan.md`.
+- Phase 9 — MVP release (final phase of the definitive plan): tagging,
+  release artifacts, dependency lock for release.
