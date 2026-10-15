@@ -84,3 +84,48 @@ them entirely would mean forking around `tantivy`'s `lru` for zero legal gain.
      exception via hnsw_rs.
 3. `subtle` (BSD-3-Clause, via markit's ureq): avoidable in Phase 4 by stubbing
    markit's HTTP fetch (Polyvec feeds bytes directly) — decide then.
+
+## Phase 4 results (2026-10-15)
+
+New dependency trees: `reqwest` (remote embedding adapter, rustls) and the
+vendored `markit` (converter backend). `cargo deny check` green after
+documented exceptions (see `deny.toml`).
+
+### `subtle` (BSD-3-Clause) — the Phase 4 call
+
+The Phase 1 audit flagged `subtle` via `markit → ureq` and deferred the
+decision to Phase 4. **Done:** the vendored markit stubs HTTP fetching
+(`DisabledHttpFetcher`; see `vendor/markit/VENDOR.md`) — Polyvec feeds bytes
+directly, so markit's `ureq` dependency is gone and its `subtle` chain with
+it. `subtle 2.6.1` remains in the tree via `rustls ← reqwest` (constant-time
+comparisons in TLS); BSD-3-Clause is in the audit's pre-approved BSD
+category, so it gets a documented `deny.toml` exception.
+
+### markit tree (new transitive licenses)
+
+| Crate | License | Provenance | Verdict |
+|---|---|---|---|
+| `scraper` 0.27.0, `ego-tree` 0.11.0 | ISC | markit → scraper (HTML parsing) | Exception: permissive, OSI-approved |
+| `mutate_once` 0.1.2, `kamadak-exif` 0.6.1 | BSD-2-Clause | scraper / markit (image EXIF) | Exception: permissive, OSI-approved |
+| `cssparser` 0.37.0, `cssparser-macros` 0.7.1, `dtoa-short` 0.3.5, `selectors` 0.38.0 | **MPL-2.0** | scraper → selectors/cssparser | **Exception with flag:** weak copyleft, file-scoped — requires sharing modifications to those files only, does not propagate to Polyvec. Unavoidable for HTML parsing. Flagged for Roger's review (reversible). |
+| `libbz2-rs-sys` 0.2.5 | bzip2-1.0.6 | markit → zip | Exception: BSD-style permissive |
+| `ppmd-rust` 1.5.0 | CC0-1.0 OR MIT-0 | markit → zip | Exception: public domain |
+| `zlib-rs` 0.6.8 | Zlib | markit → zip → flate2 | Exception: same class as the Phase 2 foldhash exception |
+
+### reqwest/rustls tree (new transitive licenses)
+
+| Crate | License | Provenance | Verdict |
+|---|---|---|---|
+| `rustls-webpki` 0.103.15, `untrusted` 0.9.0, `aws-lc-rs` 1.18.2 | ISC | reqwest → rustls | Exception: permissive, OSI-approved |
+| `aws-lc-sys` 0.46.0 | ISC/Apache-2.0/MIT/BSD-3-Clause mix | rustls crypto provider | Exception: all components permissive |
+| `webpki-root-certs` 1.0.9 | CDLA-Permissive-2.0 | rustls root certificates data | Exception: permissive data license, OSI-approved |
+
+### Advisories
+
+- `RUSTSEC-2024-0436` (`paste` 1.0.15, unmaintained — NOT a vulnerability):
+  build-time proc-macro via `markit → lofty` (audio metadata). Ignored with
+  rationale in `deny.toml`; unavoidable without patching vendored markit to
+  drop audio support.
+
+**No GPL/AGPL anywhere in the Phase 4 tree.** Verified via `cargo deny check`
+(green 2026-10-15).

@@ -51,8 +51,8 @@ phase that first needs them (see "No empty placeholder crates" below).
 | `polyvec-index` | Vector index: hnsw_rs wrapper, Polyvec-owned tombstones, exact-search baseline | Phase 2 (exists) |
 | `polyvec-storage` | Durable catalog: redb-backed collections/documents/metadata, persistence, recovery | Phase 2 (exists) |
 | `polyvec-server` | Actix Web routes, API schemas, config, graceful shutdown | Phase 3 (exists) |
-| `polyvec-ingestion` | Canonical model, chunking, ingestion jobs, converter adapter (markit) | Phase 4 |
-| `polyvec-embeddings` | Provider interface, adapters, batching, dimension validation | Phase 4 |
+| `polyvec-ingestion` | Canonical model, chunking, ingestion jobs, converter adapter (markit) | Phase 4 (exists) |
+| `polyvec-embeddings` | Provider interface, adapters, batching, dimension validation | Phase 4 (exists) |
 | `polyvec-retrieval` | Lexical (tantivy), hybrid fusion, result contract (Phase 5); bounded graph retrieval (Phase 6) | Phase 5 |
 
 Phase numbers are first-need per the definitive plan (Phases 0–9); a phase that
@@ -146,6 +146,35 @@ error path: polyvec_core::Error → ApiError → { "error": { "code",
 AlreadyExists→409, Unsupported→501, Corrupt/Storage/Internal→500 with
 safe messages — details go to the server log only)
 ```
+
+### Ingestion data flow (Phase 4)
+
+```text
+POST /v1/collections/{id}/ingest {source, content.{text|base64}, metadata?, vectors?}
+  │  1. route + Json extract                       [polyvec-server routes]
+  │  2. body validation; 501 fail-fast when text needs a provider and none
+  │     is configured; 404 when the collection is unknown
+  │  3. JobRunner.try_submit_ingest → 202 {job_id}  [polyvec-ingestion]
+  │     (bounded queue → 429 + Retry-After when full; idempotency key
+  │      dedups in-flight duplicates)
+  │  4. accept loop → blocking pool per job:
+  │       convert (markit → Markdown) → canonicalize (deterministic;
+  │         original + canonical hashes) → change-detect (unchanged →
+  │         skip; vectors_present guard finishes partial writes) →
+  │       chunk (section-aware, deterministic ids) →
+  │       embed (supplied vectors or provider, batched; dimension checked;
+  │         collection model tag stamped once) →
+  │       ingest_document (atomic: old version tombstoned, new stored)
+  │  5. GET /v1/jobs/{job_id} → state + error detail / affected records
+```
+
+`JobRunner` owns a `JobStore` (`{data_dir}/jobs.redb`): the state machine
+`pending → running → done | failed` (+ `retrying`, bounded attempts with
+exponential backoff honoring 429 `Retry-After`). Transient (429/5xx/
+timeout) vs permanent (4xx/auth/dimension) classification — permanent is
+never retried. `POST /v1/collections/{id}/query {text, k}` embeds via the
+configured provider (`POLYVEC_EMBEDDING_PROVIDER=none|stub|remote`) then
+searches; 501 when unconfigured. Full reference: `docs/API.md`, `docs/ingestion.md`.
 
 `Registry` (in `polyvec-server`) holds `data_dir` +
 `Mutex<HashMap<CollectionId, Arc<Mutex<CollectionStore>>>>`. Collections

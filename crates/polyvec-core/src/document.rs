@@ -127,8 +127,52 @@ impl Chunk {
         char_start: usize,
         char_end: usize,
     ) -> Self {
+        Self::new_inner(
+            ChunkId::for_index(&document_id, index),
+            document_id,
+            index,
+            text,
+            char_start,
+            char_end,
+        )
+    }
+
+    /// Creates a chunk for `version` of `document_id`; the id is derived
+    /// from (document, version, index) — see
+    /// [`ChunkId::for_versioned_index`].
+    ///
+    /// The ingestion pipeline uses this so each document version gets fresh
+    /// chunk (and vector) ids; the old version's vectors are tombstoned
+    /// without id collisions.
+    #[must_use]
+    pub fn new_versioned(
+        document_id: DocumentId,
+        version: u64,
+        index: u32,
+        text: &str,
+        char_start: usize,
+        char_end: usize,
+    ) -> Self {
+        Self::new_inner(
+            ChunkId::for_versioned_index(&document_id, version, index),
+            document_id,
+            index,
+            text,
+            char_start,
+            char_end,
+        )
+    }
+
+    fn new_inner(
+        id: ChunkId,
+        document_id: DocumentId,
+        index: u32,
+        text: &str,
+        char_start: usize,
+        char_end: usize,
+    ) -> Self {
         Self {
-            id: ChunkId::for_index(&document_id, index),
+            id,
             hash: ContentHash::of(text.as_bytes()),
             document_id,
             index,

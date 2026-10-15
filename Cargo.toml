@@ -2,10 +2,16 @@
 resolver = "2"
 members = [
     "crates/polyvec-core",
+    "crates/polyvec-embeddings",
     "crates/polyvec-index",
+    "crates/polyvec-ingestion",
     "crates/polyvec-storage",
     "crates/polyvec-server",
 ]
+# The vendored markit tree is a plain path dependency (it declares its own
+# empty [workspace] so it never joins this one); excluded here so Cargo does
+# not treat it as a second workspace root.
+exclude = ["vendor/markit"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,7 +31,9 @@ log = "0.4.28"
 hnsw_rs = "0.3.5"
 redb = "4.4.0"
 polyvec-core = { path = "crates/polyvec-core", version = "0.1.0" }
+polyvec-embeddings = { path = "crates/polyvec-embeddings", version = "0.1.0" }
 polyvec-index = { path = "crates/polyvec-index", version = "0.1.0" }
+polyvec-ingestion = { path = "crates/polyvec-ingestion", version = "0.1.0" }
 polyvec-storage = { path = "crates/polyvec-storage", version = "0.1.0" }
 
 [workspace.lints.rust]

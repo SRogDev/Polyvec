@@ -20,6 +20,7 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    retry_after_secs: Option<u64>,
 }
 
 impl ApiError {
@@ -30,6 +31,7 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            retry_after_secs: None,
         }
     }
 
@@ -47,6 +49,18 @@ impl ApiError {
             "payload_too_large",
             format!("request body exceeds the {limit}-byte JSON limit"),
         )
+    }
+
+    /// 429 when the ingest queue is full (backpressure, not a silent drop).
+    /// Carries a `Retry-After` response header with the hint in seconds.
+    #[must_use]
+    pub fn too_many_requests(retry_after_secs: u64) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "queue_full",
+            message: format!("ingest queue is full; retry after {retry_after_secs}s"),
+            retry_after_secs: Some(retry_after_secs),
+        }
     }
 
     /// 503 when the server cannot serve requests (data dir unusable).
@@ -96,6 +110,14 @@ impl From<CoreError> for ApiError {
                 "unsupported",
                 format!("not supported: {detail}"),
             ),
+            CoreError::Provider { detail } => {
+                log::error!("embedding provider failure: {detail}");
+                Self::new(
+                    StatusCode::BAD_GATEWAY,
+                    "provider_error",
+                    "embedding provider failure; see server logs",
+                )
+            }
             CoreError::Corrupt { detail } => {
                 log::error!("corrupt data: {detail}");
                 Self::new(
@@ -140,13 +162,40 @@ impl ResponseError for ApiError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status).json(serde_json::json!({
+        let mut response = HttpResponse::build(self.status);
+        if let Some(secs) = self.retry_after_secs {
+            response.insert_header((actix_web::http::header::RETRY_AFTER, secs.to_string()));
+        }
+        response.json(serde_json::json!({
             "error": {
                 "code": self.code,
                 "message": self.message,
                 "detail": serde_json::Value::Null,
             }
         }))
+    }
+}
+
+/// Maps embedding failures to 502 via the provider error shape.
+impl From<polyvec_embeddings::EmbedError> for ApiError {
+    fn from(err: polyvec_embeddings::EmbedError) -> Self {
+        Self::from(CoreError::from(err))
+    }
+}
+
+/// Maps job-submission failures: queue-full → 429 (`Retry-After`),
+/// shutting-down → 503, store failures → the core mapping.
+impl From<polyvec_ingestion::SubmitError> for ApiError {
+    fn from(err: polyvec_ingestion::SubmitError) -> Self {
+        match err {
+            polyvec_ingestion::SubmitError::QueueFull { retry_after_secs } => {
+                Self::too_many_requests(retry_after_secs)
+            }
+            polyvec_ingestion::SubmitError::ShuttingDown => {
+                Self::unavailable("ingest runner is shutting down")
+            }
+            polyvec_ingestion::SubmitError::Store(core) => Self::from(core),
+        }
     }
 }
 
@@ -223,6 +272,13 @@ mod tests {
                 },
                 StatusCode::NOT_IMPLEMENTED,
                 "unsupported",
+            ),
+            (
+                CoreError::Provider {
+                    detail: "timeout".to_string(),
+                },
+                StatusCode::BAD_GATEWAY,
+                "provider_error",
             ),
             (
                 CoreError::Corrupt {
