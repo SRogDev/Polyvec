@@ -14,6 +14,8 @@
 //!   subsystem consumes (`CollectionConfig`, `DistanceMetric`, `HnswParams`).
 //! * **State** — collection lifecycle and [`IndexState`] tracking.
 //! * **Hashes** — [`ContentHash`] (SHA-256) for change detection.
+//! * **Retrieval contracts** — query [`RetrievalMode`]s, [`MetadataFilter`],
+//!   score/path vocabulary shared by the vector, lexical, and hybrid paths.
 //! * [`Error`] — the workspace-wide error type.
 //!
 //! What deliberately does **not** live here:
@@ -31,6 +33,7 @@ pub mod hash;
 pub mod ids;
 pub mod metadata;
 pub mod metric;
+pub mod retrieval;
 pub mod state;
 pub mod vector;
 
@@ -41,6 +44,7 @@ pub use hash::ContentHash;
 pub use ids::{ChunkId, CollectionId, DocumentId, VectorId};
 pub use metadata::{Metadata, MetadataValue};
 pub use metric::DistanceMetric;
+pub use retrieval::{MetadataFilter, RetrievalMode, RetrievalPath, RrfConfig, ScoreKind};
 pub use state::{CollectionLifecycle, INDEX_FORMAT_VERSION, IndexState, SyncStatus};
 pub use vector::Vector;
 
