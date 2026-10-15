@@ -55,14 +55,28 @@ async fn main() -> std::io::Result<()> {
     });
     let shutdown_state = state.clone();
     let serve_state = state.clone();
-    let json_limit = config.json_limit;
     let bind = config.bind;
 
+    if config.api_key.is_some() {
+        log::info!("API authentication enabled (bearer token on /v1/*)");
+    } else if config.allow_nonlocal_bind {
+        // The bind was explicitly opened beyond localhost with no
+        // credential: anyone on the network has full read/write/delete.
+        log::warn!(
+            "binding {bind} with POLYVEC_ALLOW_NONLOCAL_BIND=1 but no POLYVEC_API_KEY: \
+             the API is exposed to the network WITHOUT authentication"
+        );
+    }
+    if config.rate_limit_rps == 0 {
+        log::info!("rate limiting disabled (POLYVEC_RATE_LIMIT_RPS=0)");
+    }
+
+    let route_config = config.clone();
     let mut server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(serve_state.clone()))
             .wrap(Logger::default())
-            .configure(|cfg| configure_routes(cfg, json_limit))
+            .configure(|cfg| configure_routes(cfg, &route_config))
     });
     if let Some(workers) = config.workers {
         server = server.workers(workers);

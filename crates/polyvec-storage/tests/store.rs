@@ -713,3 +713,184 @@ fn all_documents_scans_docs_with_chunks_in_key_order() {
         assert!(chunks.windows(2).all(|w| w[0].index < w[1].index));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 7 reliability: concurrency soak, write failure, restart-during-writes
+// ---------------------------------------------------------------------------
+
+use std::sync::{Arc, Barrier, Mutex};
+
+/// Deterministic xorshift64* step for the soak workers.
+fn soak_step(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    *state = x;
+    x
+}
+
+/// Eight threads hammer one store (the same `Arc<Mutex<…>>` shape the server
+/// uses) with interleaved inserts, searches, updates and deletes. Asserts
+/// no panic/deadlock and a coherent final state: every search hit is
+/// gettable and the live count is internally consistent.
+#[test]
+fn concurrent_read_write_soak() {
+    let dir = tmp("concurrent-soak");
+    let store = Arc::new(Mutex::new(
+        CollectionStore::create(&dir, test_config(16)).unwrap(),
+    ));
+    {
+        let mut s = store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for i in 0..64u64 {
+            s.insert_vector(Vector::new(vid(i), unit_vec(i, 16), 16).unwrap())
+                .unwrap();
+        }
+    }
+
+    let barrier = Arc::new(Barrier::new(9));
+    let mut handles = Vec::new();
+    for t in 0..8u64 {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let mut rng =
+                0x9E37_79B9_7F4A_7C15u64.wrapping_add(t.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+            let mut inserts = 0u64;
+            let mut deletes = 0u64;
+            for i in 0..60u64 {
+                let mut s = store
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match soak_step(&mut rng) % 4 {
+                    0 => {
+                        let id = 10_000 + t * 1_000 + i; // thread-unique
+                        if s.insert_vector(Vector::new(vid(id), unit_vec(id, 16), 16).unwrap())
+                            .is_ok()
+                        {
+                            inserts += 1;
+                        }
+                    }
+                    1 => {
+                        let q = unit_vec(t.wrapping_mul(31).wrapping_add(i), 16);
+                        let _ = s.search(&q, 5, 32);
+                    }
+                    2 => {
+                        let id = 10_000 + t * 1_000 + (i % 60); // may not exist yet
+                        // Net-zero on success (tombstone + reinsert); NotFound
+                        // when the id was never inserted — both fine.
+                        let _ = s.update_vector(
+                            Vector::new(vid(id), unit_vec(id.wrapping_add(7), 16), 16).unwrap(),
+                        );
+                    }
+                    _ => {
+                        // Delete a seed vector; count only effective deletes
+                        // (live → tombstoned) so the final count is exact.
+                        let id = vid((t + i) % 64);
+                        if s.get_vector(&id).is_ok() {
+                            s.delete_vector(&id).unwrap();
+                            deletes += 1;
+                        }
+                    }
+                }
+            }
+            (inserts, deletes)
+        }));
+    }
+    barrier.wait();
+    let mut total_inserts = 0u64;
+    let mut total_deletes = 0u64;
+    for h in handles {
+        let (inserts, deletes) = h.join().expect("soak worker panicked");
+        total_inserts += inserts;
+        total_deletes += deletes;
+    }
+
+    let s = store
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stats = s.stats();
+    let hits = s.search(&unit_vec(3, 16), 10, 32).unwrap();
+    assert!(hits.len() <= 10);
+    for hit in &hits {
+        assert!(
+            s.get_vector(&hit.vector_id).is_ok(),
+            "search hit must be gettable"
+        );
+    }
+    // Inserts were thread-unique; updates are net-zero (tombstone +
+    // reinsert); deletes counted only when effective. The final live
+    // count is exact — no lost updates, no phantom vectors.
+    let expected_live = 64 + total_inserts - total_deletes;
+    assert_eq!(
+        stats.live_vectors,
+        expected_live,
+        "live_vectors={} != 64 + {inserts} - {deletes}",
+        stats.live_vectors,
+        inserts = total_inserts,
+        deletes = total_deletes,
+    );
+}
+
+/// A file where the data dir should be: open/create must fail with a
+/// storage error, never a panic. (True ENOSPC is not simulatable in a unit
+/// test — recorded as a known limitation.)
+#[test]
+fn write_failure_when_data_dir_is_a_file() {
+    let dir = tmp("write-failure");
+    let blocker = dir.join("blocker");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+
+    let Err(err) = CollectionStore::create(&blocker, test_config(16)) else {
+        panic!("create on a file path must fail")
+    };
+    assert!(
+        matches!(err, Error::Storage { .. }),
+        "create on a file path must be Storage, got: {err:?}"
+    );
+    let Err(err) = CollectionStore::open(&blocker) else {
+        panic!("open on a file path must fail")
+    };
+    assert!(
+        matches!(
+            err,
+            Error::Storage { .. } | Error::Corrupt { .. } | Error::NotFound { .. }
+        ),
+        "open on a file path must be a clean error, got: {err:?}"
+    );
+}
+
+/// Writes happen, the store is dropped without a flush ("restart"), more
+/// writes happen after reopen, then a final reopen. The catalog is the
+/// source of truth (ADR-004): no vector is lost across the restarts.
+#[test]
+fn restart_between_write_batches_recovers() {
+    let dir = tmp("restart-writes");
+    {
+        let mut store = CollectionStore::create(&dir, test_config(16)).unwrap();
+        for i in 0..30u64 {
+            store
+                .insert_vector(Vector::new(vid(i), unit_vec(i, 16), 16).unwrap())
+                .unwrap();
+        }
+        store.flush().unwrap();
+        // dropped here without a second flush — like a restart mid-batch
+    }
+    {
+        let (mut store, _) = CollectionStore::open(&dir).unwrap();
+        for i in 30..60u64 {
+            store
+                .insert_vector(Vector::new(vid(i), unit_vec(i, 16), 16).unwrap())
+                .unwrap();
+        }
+        // dropped without flush again
+    }
+    let (store, _) = CollectionStore::open(&dir).unwrap();
+    assert_eq!(store.stats().live_vectors, 60);
+    let hits = store.search(&unit_vec(45, 16), 5, 100).unwrap();
+    assert!(!hits.is_empty());
+}

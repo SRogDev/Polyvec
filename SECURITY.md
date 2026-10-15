@@ -97,3 +97,54 @@ The entire network posture below exists to make that fact safe by default.
   tracked as a Phase 7 concern.
 - `RUST_LOG=debug` increases log volume but handlers never log bodies or
   vector values at any level.
+
+---
+
+## Phase 7 security delta (2026-10-15)
+
+The two deferred Phase 3 items are **implemented** (not documented-away):
+bearer-token auth + per-IP rate limiting, both env-configured, both safe
+by default.
+
+### New controls
+
+| Control | Default | Behavior |
+|---|---|---|
+| `POLYVEC_API_KEY` | unset (auth off) | When set, every `/v1` route requires `Authorization: Bearer <key>` → `401` + `WWW-Authenticate: Bearer` otherwise. `/healthz` and `/readyz` stay open. |
+| `POLYVEC_RATE_LIMIT_RPS` | `1000` | Token bucket per client IP on `/v1` routes (burst = 4×, min 16). Exceeded → `429` + `Retry-After: 1` with the shared `{error:{code,message,detail}}` shape. `0` disables. |
+
+Security properties (all tested):
+
+- The expected key is compared in constant time (no early exit on
+  content mismatch); a timing probe learns nothing beyond the key length.
+- The key is never logged and never appears in error responses:
+  `ServerConfig`'s `Debug` impl renders it as `<redacted>` (test asserts
+  the rendered config contains no key material).
+- The rate limiter is an in-memory per-IP token bucket: single-process,
+  best-effort, resets on restart. Behind a reverse proxy the *proxy's* IP
+  is what gets limited — rate-limit at the proxy in that case.
+- Startup warns loudly when `POLYVEC_ALLOW_NONLOCAL_BIND=1` is set
+  without `POLYVEC_API_KEY`: the API would be exposed to the network
+  with no credential.
+
+### Threat-model updates (boundary-breaker re-check, 2026-10-15)
+
+| Finding (was) | New tier / status | Evidence |
+|---|---|---|
+| No auth: socket reach = full R/W/D (CONFIRMED, by design) | **Mitigated when configured; unchanged by default** | Auth hook exists and is tested (401 without/with wrong/with right key; probes stay open). Default stays localhost-only with no auth — the Phase 3 posture, now an explicit operator choice. |
+| Delete-vs-write race (PLAUSIBLE) | **CONFIRMED-safe** | New test `concurrent_delete_and_insert_no_panic`: concurrent delete + vector insert → no panic, no hang, coherent final state (collection gone, server healthy). |
+| Create-vs-create same-id race (PLAUSIBLE) | **CONFIRMED-safe** | New test `concurrent_create_same_id_single_winner`: 8 concurrent creates → exactly one `201`, seven `409`. `Registry::create` holds the handles mutex across check+create, so the race is serialized by construction. |
+| serde_json nesting depth (UNTESTED) | **CONFIRMED-safe** | New test `deeply_nested_metadata_rejected`: 200-deep nested metadata → `400` (recursion limit 128), no stack exhaustion. |
+| No rate limiting (residual note) | **Implemented** | Token-bucket limiter; `429` + `Retry-After` tested. Default 1000 rps; `0` disables. |
+| URL-ingestion SSRF | **No surface (confirmed by construction)** | The ingest API takes `source` as an opaque label plus content bytes; the vendored markit's HTTP fetcher is stubbed to fail loudly. New test `url_source_is_label_never_fetched`: a link-local URL as `source` completes offline using the supplied bytes. |
+| Local-file path ingestion | **No surface** | No endpoint reads operator-supplied filesystem paths; collection dirs derive from validated slug ids (`CollectionId::new`), unchanged from Phase 3. |
+| `kill -9` mid-batch over HTTP | **Still UNTESTED over HTTP** | Storage-layer recovery is tested (Phase 2/7); layer C of the benchmark harness covers SIGTERM → restart → searchable. A raw `kill -9` over HTTP remains untested — recovery on open is the designed behavior (ADR-004). |
+
+### Re-checks (Phase 7)
+
+- **No secrets in logs**: handlers log ids/counts/generations only; the
+  API key is redacted from `Debug`; 401 bodies assert no key leakage.
+- **Request size limits**: 16 MiB JSON limit (413) unchanged; deeply
+  nested payloads rejected at the serde recursion limit.
+- **Path/URL validation**: unchanged from Phase 3 (slug ids; no URL
+  fetching; no local file reads).

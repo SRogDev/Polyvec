@@ -1,0 +1,35 @@
+[package]
+name = "polyvec-bench"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Benchmark harness for Polyvec (Phase 7): criterion micro-benchmarks + a single-shot report binary"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+polyvec-core = { workspace = true }
+polyvec-index = { workspace = true }
+polyvec-storage = { workspace = true }
+polyvec-ingestion = { workspace = true }
+polyvec-embeddings = { workspace = true }
+polyvec-retrieval = { workspace = true }
+polyvec-server = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time"] }
+ureq = { version = "3", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "vector_engine"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false

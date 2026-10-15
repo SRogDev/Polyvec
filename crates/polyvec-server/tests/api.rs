@@ -26,6 +26,10 @@ fn test_config(data_dir: PathBuf) -> ServerConfig {
         embedding: EmbeddingKind::None,
         job_queue_capacity: 16,
         job_concurrency: 2,
+        api_key: None,
+        // Disabled in the test harness for determinism (no timing flakes);
+        // rate limiting is covered by dedicated tests below.
+        rate_limit_rps: 0,
     }
 }
 
@@ -55,13 +59,42 @@ async fn test_app_with_limit(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    let state = AppState::new(&test_config(data_dir)).expect("test app state");
+    let mut config = test_config(data_dir);
+    config.json_limit = json_limit;
+    test_app_with_config(config).await
+}
+
+/// Test app from a fully-specified config (auth / rate-limit tests).
+async fn test_app_with_config(
+    config: ServerConfig,
+) -> impl actix_web::dev::Service<
+    actix_http::Request,
+    Response = actix_web::dev::ServiceResponse,
+    Error = actix_web::Error,
+> {
+    let state = AppState::new(&config).expect("test app state");
     awtest::init_service(
         App::new()
             .app_data(web::Data::new(state))
-            .configure(move |cfg| configure_routes(cfg, json_limit)),
+            .configure(|cfg| configure_routes(cfg, &config)),
     )
     .await
+}
+
+/// Test app with an API key and/or rate limit enabled.
+async fn test_app_with_security(
+    data_dir: PathBuf,
+    api_key: Option<&str>,
+    rate_limit_rps: u32,
+) -> impl actix_web::dev::Service<
+    actix_http::Request,
+    Response = actix_web::dev::ServiceResponse,
+    Error = actix_web::Error,
+> {
+    let mut config = test_config(data_dir);
+    config.api_key = api_key.map(str::to_string);
+    config.rate_limit_rps = rate_limit_rps;
+    test_app_with_config(config).await
 }
 
 fn error_code(body: &Value) -> &str {
@@ -1055,11 +1088,12 @@ async fn test_app_with_provider(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    let state = AppState::with_provider(&test_config(data_dir), provider).expect("test app state");
+    let config = test_config(data_dir);
+    let state = AppState::with_provider(&config, provider).expect("test app state");
     awtest::init_service(
         App::new()
             .app_data(web::Data::new(state))
-            .configure(move |cfg| configure_routes(cfg, TEST_JSON_LIMIT)),
+            .configure(|cfg| configure_routes(cfg, &config)),
     )
     .await
 }
@@ -1740,12 +1774,12 @@ async fn build_app_with_state(
         Error = actix_web::Error,
     >,
 ) {
-    let state =
-        AppState::with_provider(&test_config(dir), Some(stub_provider())).expect("test app state");
+    let config = test_config(dir);
+    let state = AppState::with_provider(&config, Some(stub_provider())).expect("test app state");
     let app = awtest::init_service(
         App::new()
             .app_data(web::Data::new(state.clone()))
-            .configure(|cfg| configure_routes(cfg, TEST_JSON_LIMIT)),
+            .configure(|cfg| configure_routes(cfg, &config)),
     )
     .await;
     (state, app)
@@ -1783,4 +1817,333 @@ async fn lexical_index_rebuilt_on_reopen() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(hit_sources(&body), vec!["src://persist".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 reliability: races, deep nesting, duplicate ingest, URL-as-label
+// ---------------------------------------------------------------------------
+
+/// Barrier-synchronized concurrent creates of the same collection id
+/// (the Phase 3 PLAUSIBLE "create-vs-create" race): `Registry::create`
+/// holds the handles mutex across check+create, so exactly one request
+/// wins with 201 and the rest get 409 — no panic, no 500, no corruption.
+/// The eight requests are in flight at once and interleave at await points.
+#[actix_web::test]
+async fn concurrent_create_same_id_single_winner() {
+    let app = test_app(tmp_data_dir("race-create")).await;
+    let mk = || {
+        let req = awtest::TestRequest::post()
+            .uri("/v1/collections")
+            .set_json(json!({"id": "race", "dimension": 16, "metric": "cosine"}))
+            .to_request();
+        awtest::call_service(&app, req)
+    };
+    let (r1, r2, r3, r4, r5, r6, r7, r8) =
+        tokio::join!(mk(), mk(), mk(), mk(), mk(), mk(), mk(), mk());
+    let (mut created, mut conflict) = (0, 0);
+    for r in [r1, r2, r3, r4, r5, r6, r7, r8] {
+        match r.status() {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => conflict += 1,
+            s => panic!("unexpected status {s} in create race"),
+        }
+    }
+    assert_eq!(created, 1, "exactly one create must win");
+    assert_eq!(conflict, 7, "losers must get 409");
+}
+
+/// Concurrent delete-vs-insert on the same collection (the Phase 3 PLAUSIBLE
+/// "delete-vs-write" race): the loser holds its `Arc` and finishes against
+/// the unlinked directory; nothing panics, nothing hangs, and the final
+/// state is coherent (the collection is gone — delete always unlinks last).
+#[actix_web::test]
+async fn concurrent_delete_and_insert_no_panic() {
+    let app = test_app(tmp_data_dir("race-delete")).await;
+    create_collection(&app, "race", 16).await;
+
+    let del = async {
+        let req = awtest::TestRequest::delete()
+            .uri("/v1/collections/race")
+            .to_request();
+        awtest::call_service(&app, req).await.status()
+    };
+    let write = async {
+        let vectors: Vec<Value> = (0..10)
+            .map(|i| json!({"id": format!("w-{i}"), "values": vec![0.5f32; 16]}))
+            .collect();
+        let req = awtest::TestRequest::post()
+            .uri("/v1/collections/race/vectors")
+            .set_json(json!({"vectors": vectors}))
+            .to_request();
+        awtest::call_service(&app, req).await.status()
+    };
+    let (del_status, write_status) = tokio::join!(del, write);
+    assert!(
+        matches!(del_status, StatusCode::NO_CONTENT | StatusCode::NOT_FOUND),
+        "delete status: {del_status}"
+    );
+    assert!(
+        matches!(
+            write_status,
+            StatusCode::CREATED | StatusCode::NOT_FOUND | StatusCode::INTERNAL_SERVER_ERROR
+        ),
+        "write status: {write_status}"
+    );
+
+    // Final state: the collection is gone, and the server is still healthy.
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections/race/stats")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let req = awtest::TestRequest::get().uri("/healthz").to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// 200-deep nested metadata: `serde_json`'s default recursion limit (128)
+/// must reject the payload with 400, not exhaust the stack.
+#[actix_web::test]
+async fn deeply_nested_metadata_rejected() {
+    let app = test_app(tmp_data_dir("deep-nest")).await;
+    create_collection(&app, "kb", 16).await;
+
+    let mut nested = String::from("{\"leaf\": true}");
+    for _ in 0..200 {
+        nested = format!("{{\"a\": {nested}}}");
+    }
+    let body = format!(
+        "{{\"source\": \"src://deep\", \"content\": {{\"text\": \"hello\"}}, \"metadata\": {nested}}}"
+    );
+    let req = awtest::TestRequest::put()
+        .uri("/v1/collections/kb/documents")
+        .insert_header(("content-type", "application/json"))
+        .set_payload(body)
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "200-deep nesting must be 400"
+    );
+}
+
+/// Two concurrent submits with the same idempotency key: one job is
+/// created, both submitters get that job id (no duplicate work).
+#[actix_web::test]
+async fn duplicate_ingest_submission_dedups() {
+    let dir = tmp_data_dir("ingest-dedup");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    let payload = || {
+        json!({
+            "source": "src://dedup",
+            "content": {"text": "deduplicated content here"},
+            "idempotency_key": "dup-key-1",
+        })
+    };
+    let (s1, b1) = submit_ingest(&app, "kb", payload()).await;
+    let (s2, b2) = submit_ingest(&app, "kb", payload()).await;
+    assert_eq!(s1, StatusCode::ACCEPTED, "body: {b1}");
+    assert_eq!(s2, StatusCode::ACCEPTED, "body: {b2}");
+    assert_eq!(
+        b1["job_id"], b2["job_id"],
+        "duplicate submit must return the same job"
+    );
+
+    let job = wait_job_done(&app, b1["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "error: {}", job["error"]);
+
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections/kb/jobs")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = awtest::read_body_json(resp).await;
+    assert_eq!(
+        body["count"], 1,
+        "exactly one job row for the duplicated submit"
+    );
+}
+
+/// `source` is an opaque label, never fetched: a link-local URL as source
+/// completes offline using the supplied content bytes. (The vendored
+/// markit's HTTP fetcher is stubbed to fail loudly — there is no code path
+/// that performs a request, so there is no SSRF surface to test beyond
+/// this.)
+#[actix_web::test]
+async fn url_source_is_label_never_fetched() {
+    let dir = tmp_data_dir("url-label");
+    let app = test_app_with_provider(dir, Some(stub_provider())).await;
+    create_collection(&app, "kb", 64).await;
+
+    let payload = json!({
+        "source": "http://169.254.169.254/latest/meta-data/",
+        "content": {"text": "the quick brown fox jumps over the lazy dog"},
+    });
+    let (status, body) = submit_ingest(&app, "kb", payload).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    let job = wait_job_done(&app, body["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "error: {}", job["error"]);
+
+    // The content bytes were ingested; nothing was fetched.
+    let req = awtest::TestRequest::post()
+        .uri("/v1/collections/kb/query")
+        .set_json(json!({"text": "quick brown fox", "k": 5}))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = awtest::read_body_json(resp).await;
+    let hits = body["hits"].as_array().unwrap();
+    assert!(!hits.is_empty(), "body: {body}");
+    assert_eq!(
+        hits[0]["source"],
+        "http://169.254.169.254/latest/meta-data/"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7: bearer-token auth + rate limiting
+// ---------------------------------------------------------------------------
+
+/// With `POLYVEC_API_KEY` set, every `/v1` route requires
+/// `Authorization: Bearer <key>`: missing/wrong → 401 + `WWW-Authenticate`,
+/// correct → through. `/healthz` and `/readyz` stay open (probes must not
+/// need credentials).
+#[actix_web::test]
+async fn auth_required_when_key_set() {
+    let app = test_app_with_security(tmp_data_dir("auth"), Some("s3cret-key"), 0).await;
+
+    // No credential → 401 with WWW-Authenticate, and the key leaks nowhere.
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        resp.headers().contains_key("www-authenticate"),
+        "401 must carry WWW-Authenticate"
+    );
+    let body: Value = awtest::read_body_json(resp).await;
+    assert_eq!(error_code(&body), "unauthorized");
+    assert!(
+        !body.to_string().contains("s3cret-key"),
+        "key must not leak into the 401 body"
+    );
+
+    // Wrong credential → 401 as well.
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections")
+        .insert_header(("authorization", "Bearer wrong-key"))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Correct credential → through, including a mutating route.
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections")
+        .insert_header(("authorization", "Bearer s3cret-key"))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = awtest::TestRequest::post()
+        .uri("/v1/collections")
+        .insert_header(("authorization", "Bearer s3cret-key"))
+        .set_json(json!({"id": "secure", "dimension": 16, "metric": "cosine"}))
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Probes stay open without a credential.
+    for uri in ["/healthz", "/readyz"] {
+        let req = awtest::TestRequest::get().uri(uri).to_request();
+        let resp = awtest::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{uri} must stay open");
+    }
+}
+
+/// Without a key, behavior is exactly the Phase 3–6 default: no 401s.
+#[actix_web::test]
+async fn auth_disabled_without_key() {
+    let app = test_app(tmp_data_dir("auth-off")).await;
+    let req = awtest::TestRequest::get()
+        .uri("/v1/collections")
+        .to_request();
+    let resp = awtest::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Rate limiting: with 2 rps (burst 16) the 17th+ rapid request gets 429
+/// with a `Retry-After` header and the shared error shape.
+#[actix_web::test]
+async fn rate_limit_returns_429_with_retry_after() {
+    let app = test_app_with_security(tmp_data_dir("ratelimit"), None, 2).await;
+    let mut too_many = 0;
+    let mut saw_retry_after = false;
+    for _ in 0..24 {
+        let req = awtest::TestRequest::get()
+            .uri("/v1/collections")
+            .to_request();
+        let resp = awtest::call_service(&app, req).await;
+        match resp.status() {
+            StatusCode::OK => {}
+            StatusCode::TOO_MANY_REQUESTS => {
+                too_many += 1;
+                saw_retry_after |= resp.headers().contains_key("retry-after");
+                let body: Value = awtest::read_body_json(resp).await;
+                assert_eq!(error_code(&body), "rate_limited");
+            }
+            s => panic!("unexpected status {s} under rate limiting"),
+        }
+    }
+    assert!(
+        too_many >= 1,
+        "burst+1 rapid requests must trip the limiter"
+    );
+    assert!(saw_retry_after, "429 must carry Retry-After");
+}
+
+/// The API key is redacted from `Debug`: a logged config can never leak it.
+#[test]
+fn config_debug_redacts_api_key() {
+    let config = ServerConfig::from_env_in(&[
+        ("POLYVEC_API_KEY", "s3cret-key"),
+        ("POLYVEC_RATE_LIMIT_RPS", "10"),
+    ])
+    .expect("config parses");
+    let rendered = format!("{config:?}");
+    assert!(
+        !rendered.contains("s3cret-key"),
+        "Debug must not leak the key: {rendered}"
+    );
+    assert!(
+        rendered.contains("<redacted>"),
+        "Debug must mark the key redacted: {rendered}"
+    );
+    assert_eq!(config.rate_limit_rps, 10);
+}
+
+/// Env parsing for the security knobs: defaults, empty-means-unset, and
+/// malformed values.
+#[test]
+fn config_parses_security_knobs() {
+    // Defaults: no key, 1000 rps.
+    let config = ServerConfig::from_env_in(&[]).expect("defaults parse");
+    assert_eq!(config.api_key, None);
+    assert_eq!(config.rate_limit_rps, 1000);
+
+    // Key is trimmed; empty counts as unset.
+    let config = ServerConfig::from_env_in(&[("POLYVEC_API_KEY", "  k  ")]).unwrap();
+    assert_eq!(config.api_key.as_deref(), Some("k"));
+    let config = ServerConfig::from_env_in(&[("POLYVEC_API_KEY", "   ")]).unwrap();
+    assert_eq!(config.api_key, None);
+
+    // 0 disables rate limiting.
+    let config = ServerConfig::from_env_in(&[("POLYVEC_RATE_LIMIT_RPS", "0")]).unwrap();
+    assert_eq!(config.rate_limit_rps, 0);
+
+    // Malformed values are hard errors, not silent defaults.
+    assert!(ServerConfig::from_env_in(&[("POLYVEC_RATE_LIMIT_RPS", "fast")]).is_err());
 }

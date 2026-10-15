@@ -1,4 +1,4 @@
-# Polyvec HTTP API (Phase 6)
+# Polyvec HTTP API (Phase 7)
 
 Base URL: `http://127.0.0.1:8080`. All `/v1` paths return JSON.
 The server binds **localhost only** by default; see [Configuration](#configuration).
@@ -23,6 +23,29 @@ Error responses always have this shape:
 | `storage_error` | 500 | Storage failure (safe message; details in server logs) |
 | `internal_error` | 500 | Bug (safe message; details in server logs) |
 | `service_unavailable` | 503 | Data directory not accessible (`/readyz`) |
+| `unauthorized` | 401 | Missing/invalid bearer token (only when `POLYVEC_API_KEY` is set) |
+| `rate_limited` | 429 | Per-IP rate limit exceeded; `Retry-After` header tells when to retry |
+
+## Authentication & rate limiting (Phase 7)
+
+Off by default — the localhost-only bind remains the protection, as in
+earlier phases. To require a credential on every `/v1` route:
+
+```bash
+POLYVEC_API_KEY="a-long-random-secret" polyvec-server
+curl -H "Authorization: Bearer a-long-random-secret" localhost:8080/v1/collections
+```
+
+Wrong or missing token → `401 {"error":{"code":"unauthorized",…}}` plus a
+`WWW-Authenticate: Bearer` header. `/healthz` and `/readyz` never require
+a token.
+
+Rate limiting is a per-IP token bucket on `/v1` routes
+(`POLYVEC_RATE_LIMIT_RPS`, default `1000`, burst 4×; `0` disables).
+Exceeded → `429 {"error":{"code":"rate_limited",…}}` with `Retry-After: 1`.
+If you bind beyond localhost (`POLYVEC_ALLOW_NONLOCAL_BIND=1`) without
+setting `POLYVEC_API_KEY`, the server logs a warning at startup — the API
+is then reachable with no credential.
 
 ## Health & readiness
 

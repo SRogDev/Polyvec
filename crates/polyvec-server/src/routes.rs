@@ -31,7 +31,7 @@ use crate::schemas::{
     VectorsUpsertRequest, VectorsUpsertResponse, chunks_from, collection_config_from,
     content_hash_from, metadata_from_json, parse_path_id,
 };
-use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF};
+use crate::{AppState, MAX_K, MAX_SEARCH_EF, MIN_SEARCH_EF, ServerConfig};
 use polyvec_storage::RelationQuery;
 
 // ---------------------------------------------------------------------------
@@ -580,16 +580,22 @@ async fn delete_relation(
 
 /// Registers every route on `cfg`. `json_limit` sizes the JSON extractor
 /// (bodies beyond it get 413 with the structured error shape).
-pub fn configure_routes(cfg: &mut web::ServiceConfig, json_limit: usize) {
+pub fn configure_routes(cfg: &mut web::ServiceConfig, config: &ServerConfig) {
     cfg.app_data(
         web::JsonConfig::default()
-            .limit(json_limit)
+            .limit(config.json_limit)
             .error_handler(crate::error::json_error_handler),
     )
     .route("/healthz", web::get().to(healthz))
     .route("/readyz", web::get().to(readyz))
     .service(
         web::scope("/v1")
+            .wrap(crate::security::SecurityMiddleware::new(
+                crate::security::SecurityConfig {
+                    api_key: config.api_key.clone(),
+                    rate_limit_rps: config.rate_limit_rps,
+                },
+            ))
             .route("/collections", web::post().to(create_collection))
             .route("/collections", web::get().to(list_collections))
             .route("/collections/{id}", web::get().to(get_collection))
