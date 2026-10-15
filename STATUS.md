@@ -4,11 +4,34 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 5 branch `phase-5-hybrid`: lexical + hybrid retrieval complete;
-  coordinator acceptance gate pending (build, tests, clippy -D warnings,
-  fmt, cargo deny, live e2e).
+- Phase 7 (next): reliability, quality and performance (plan §15).
 
 ## Done
+- 2026-10-15 — **Phase 6 done** (branch `phase-6-relations`, unmerged):
+  integrated relationship retrieval. Typed, directed, explicitly-supplied
+  relations (fixed vocabulary: `references`, `related_to`, `supersedes`;
+  stable ids + provenance metadata + server-stamped `created_at`) stored
+  in redb (`relations` + `rel_by_source`/`rel_by_target` composite-index
+  tables; `Catalog::open` creates missing tables idempotently, so
+  pre-Phase-6 catalogs keep opening with no format bump). Referential
+  integrity at creation (404 unknown endpoint); `delete_document`
+  cascades to relations of the doc and its chunks in both directions.
+  `POST/GET/DELETE /v1/collections/{id}/relations[/{rel_id}]`; any query
+  mode accepts `expand: {depth, max_nodes, relation_types?}` — base
+  retrieval then bounded BFS (depth ≤ 5 default 3, nodes ≤ 1000 default
+  100, fan-out 64, 2000 ms backstop), reached nodes appended with
+  `score_kind: "relationship"` and `evidence: {hops, path}`. Pure
+  `traverse()` in `polyvec-retrieval` (no storage dep; fallible adjacency
+  so storage errors fail the query). Evidence: 223 workspace tests pass
+  (incl. 8 storage-relation + 1 migration + 12 traversal + 8 server
+  relation/expand tests), clippy `-D warnings` clean, `cargo fmt --check`
+  clean, `cargo deny check` green (no new dependencies — zero license
+  impact), live `docs/e2e-relations.sh` 24/24. Multi-hop fixture:
+  lexical alone returns A; lexical + expand returns A, B, C with exact
+  evidence paths (honest scope: structural retrieval value demonstrated,
+  no semantic-quality claim). Known limitations: chunk-level relations
+  are version-pinned across re-ingests; no extraction, no graph query
+  language.
 - 2026-10-15 — **Phase 5 done**: lexical and hybrid retrieval. New crate
   `polyvec-retrieval` (tantivy 0.26.2 `default-features=false` lexical
   index per collection; Reciprocal Rank Fusion, k=60 default). Query API:
@@ -107,6 +130,7 @@
 - 2026-09-26 — Repo created (SRogDev/Polyvec).
 
 ## Next
-- Phase 6 — integrated relationship retrieval: bounded graph retrieval
-  over document/chunk relationships (lives in `polyvec-retrieval`;
-  `relationship-aware` mode on the query API).
+- Phase 7 — reliability, quality and performance (plan §15/§16): fill
+  test gaps (concurrency, crash-during-write), auth/rate-limit decision,
+  benchmark harness + honest BENCHMARKS.md. See
+  `~/workspace/polyvec-build/phase7-plan.md`.

@@ -1,9 +1,9 @@
-# Retrieval (Phase 5)
+# Retrieval (Phase 6)
 
 How exact-term and semantic queries flow through Polyvec: the vector
 index (HNSW over embeddings), the lexical index (tantivy BM25 over chunk
-text), and hybrid fusion (Reciprocal Rank Fusion). Relationship-aware
-retrieval arrives in Phase 6.
+text), hybrid fusion (Reciprocal Rank Fusion), and relationship-aware
+retrieval (bounded traversal over supplied relations — Phase 6).
 
 ## Modes
 
@@ -15,7 +15,8 @@ retrieval arrives in Phase 6.
 | `lexical` | BM25 over chunk text (tantivy) | **no** |
 | `hybrid` | RRF over the vector + lexical rankings | yes (for the vector side) |
 
-The default is `vector`: Phase 4 clients keep working unchanged.
+The default is `vector`: Phase 4 clients keep working unchanged. Any mode
+accepts `expand` for relationship-aware retrieval (Phase 6, below).
 
 ## Lexical index
 
@@ -92,9 +93,11 @@ meaningful.
 | `distance` | lower is better | Raw metric distance (L2 / cosine distance) to the query vector. |
 | `bm25` | higher is better | tantivy BM25 score. Scale is query-dependent. |
 | `rrf` | higher is better | RRF fused score. Depends on the fused lists; meaningless across queries. |
+| `relationship` | lower is better | Hops from the nearest base hit (`expand` only). Never compared with base-hit scores. |
 
-Every hit also carries `path` (`["vector"]`, `["lexical"]`, or both) —
-the retrieval-path explanation — plus `rank` (1-based in this response).
+Every hit also carries `path` (`["vector"]`, `["lexical"]`, both, or
+`["relationship"]` for hits added by `expand`) — the retrieval-path
+explanation — plus `rank` (1-based in this response).
 
 `id` is the hit's primary address: the **vector id** in `vector` mode (a
 raw vector may have no chunk — Phase 4 compatibility), the **chunk id** in
@@ -177,3 +180,115 @@ chunk. Fields that do not apply are omitted (not null).
   follow-up work driven by measurements.
 - Rebuild-on-open reindexes every collection once per server start —
   acceptable at MVP scale, revisit with incremental open when measured.
+- Chunk-level relations are version-pinned (see below).
+
+## Relationship-aware retrieval (Phase 6)
+
+`POST /v1/collections/{id}/query` accepts an `expand` object alongside
+any mode (`vector`, `lexical`, `hybrid`):
+
+```json
+{
+  "text": "xylophone",
+  "k": 5,
+  "mode": "lexical",
+  "expand": {"depth": 2, "max_nodes": 100, "relation_types": ["references"]}
+}
+```
+
+The base retrieval runs first (unchanged), then a bounded breadth-first
+traversal walks the supplied relations seeded from the base hits' chunk
+**and** document ids, and the reached nodes are appended after the base
+hits with path evidence. Omitting `expand` keeps Phase 5 behavior
+exactly — no separate `relationship` mode exists, because expansion
+without a base retrieval has no seeds.
+
+### Relation model
+
+Relations are **explicitly supplied only** — there is no automatic
+extraction and no LLM anywhere in this phase. Each relation is a directed
+edge `source → target` between two documents/chunks, with a stable id
+(caller-chosen or server-allocated `rel-{n:08}`), a type from the fixed
+vocabulary, provenance metadata (`created_by` names who/what supplied
+it), and a server-stamped `created_at`.
+
+Fixed type vocabulary (new types are a versioned-vocabulary change):
+
+| Type | Meaning |
+| ---- | ------- |
+| `references` | source cites, links to, or builds on the target |
+| `related_to` | source is topically related to the target (weak link) |
+| `supersedes` | source supersedes / replaces the target |
+
+Consistency is **referential integrity**: creating a relation requires
+both endpoints to name existing documents/chunks (`404` otherwise), and
+deleting a document removes every relation touching it or its chunks, in
+both directions, in the same operation as the chunk/vector cascade —
+there are no dangling relations by construction, no background repair.
+
+Traversal walks edges in **both directions** (a stored `A → B` is walked
+forward as `outgoing` and backward as `incoming`); the evidence marks
+the direction per hop. Seeds are never returned, each node is visited
+once (first visit wins — the recorded path is a shortest path), and
+cycles terminate.
+
+### Traversal bounds
+
+| Bound | Default | Hard cap | Rationale |
+| ----- | ------- | -------- | --------- |
+| `depth` (hops) | 3 | 5 | evidence paths beyond a few hops stop being interpretable |
+| `max_nodes` | 100 | 1000 | bounds the merged response at query scale (`k ≤ 1000`) |
+| fan-out per node | 64 | — | supernode protection (a doc cited by thousands) |
+| wall-clock | 2000 ms | — | backstop; in-memory BFS over redb should never get near it |
+
+Hitting any bound stops the walk and returns the nodes found so far — a
+bound is not an error. Fan-out truncation happens after sorting edges by
+`(type, id)`, so it is deterministic. `relation_types` narrows the walk
+to a subset of the vocabulary.
+
+### Expanded hits
+
+Expanded hits are appended **after** the base hits (base rank order is
+never disturbed) in `(hops, id)` order. A node already present as a base
+hit is not re-added. Each expanded hit carries:
+
+- `path: ["relationship"]`, `score_kind: "relationship"`, `score` = hops
+  as a float (lower is better). Like every other `score_kind`, this is a
+  different universe from base-hit scores — only the rank order within
+  one response is meaningful.
+- `evidence: {hops, path: [{relation_type, direction, relation_id}, …]}`
+  — the path that led to the hit.
+- Chunk nodes resolve like base chunk hits (chunk id, text, source,
+  metadata); document nodes carry document-level fields (no chunk text).
+  Expanded hits never carry `vector_id`/`distance` (no vector origin).
+- The response echoes the effective config as `expand: {depth,
+  max_nodes}`.
+
+An endpoint that vanishes mid-query (raced a delete) is skipped, never
+served half-built — the same rule as base hits.
+
+### What it answers that vector/hybrid cannot
+
+The committed fixture (`crates/polyvec-server/tests/relations.rs`,
+mirrored live in `docs/e2e-relations.sh`): three documents where only A
+mentions the query term, with `A --references--> B --references--> C`.
+Lexical alone returns A; `lexical` + `expand: {depth: 2}` returns A, B
+(1 hop), and C (2 hops) with exact evidence paths. B and C are
+textually distant from the query — no term-overlap or embedding
+similarity would surface them; only the supplied structure does.
+
+Honest scope note: this demonstrates *structural* retrieval value, not
+semantic quality. Whether relations improve answer quality on a real
+corpus is unmeasured (no production corpus exists yet) — the subsystem
+gives agents the mechanism (bounded, evidenced expansion), not a
+relevance claim.
+
+### Known limitations (Phase 6)
+
+- No automatic relation extraction (explicit supply only).
+- No graph query language; traversal is bounded BFS only.
+- Chunk-level relations are **version-pinned**: re-ingesting a document
+  mints new chunk ids and drops the old chunk records without migrating
+  relations, so a chunk→chunk relation points at the retired version
+  after re-ingest. Document-level relations are stable (document ids are
+  source-derived and survive re-ingest).

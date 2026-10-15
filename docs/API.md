@@ -1,4 +1,4 @@
-# Polyvec HTTP API (Phase 5)
+# Polyvec HTTP API (Phase 6)
 
 Base URL: `http://127.0.0.1:8080`. All `/v1` paths return JSON.
 The server binds **localhost only** by default; see [Configuration](#configuration).
@@ -97,6 +97,72 @@ curl -X DELETE 'localhost:8080/v1/collections/kb-main/documents/kb-main%23a1b2..
 `content_hash` (64 hex chars) is optional; it defaults to the SHA-256 of the
 concatenated chunk texts. `metadata` accepts flat string/number/boolean
 values only. DELETE cascades to chunks and their vectors.
+
+## Relations (Phase 6)
+
+Typed, directed relations between documents/chunks — explicitly supplied,
+never extracted. Fixed vocabulary: `references`, `related_to`,
+`supersedes`. Document ids contain `#`: percent-encode them in paths.
+
+```bash
+# Create (201). Both endpoints must exist (404 otherwise); self-loops are
+# 400; duplicate ids are 409. Omit "id" for a server-allocated rel-{n:08}.
+curl -X POST localhost:8080/v1/collections/kb-main/relations \
+  -H 'content-type: application/json' \
+  -d '{"id":"rel-guide-advanced","type":"references",
+       "source":"kb-main#a1b2...","target":"kb-main#c3d4...",
+       "metadata":{"created_by":"roger"}}'
+# {"id":"rel-guide-advanced","type":"references","source":"...","target":"...",
+#  "metadata":{"created_by":"roger"},"created_at":1790000000}
+
+# List/query (200): filter by endpoint and/or type; id order; paginated
+# (limit default 100, max 1000; offset default 0).
+curl 'localhost:8080/v1/collections/kb-main/relations?type=references&limit=50'
+curl 'localhost:8080/v1/collections/kb-main/relations?source=kb-main%23a1b2...'
+# {"relations":[...],"count":2,"limit":50,"offset":0}
+
+# Delete (204, idempotent).
+curl -X DELETE localhost:8080/v1/collections/kb-main/relations/rel-guide-advanced
+```
+
+Deleting a document cascades to its relations (both directions, including
+relations on its chunks) — no orphaned relations are retrievable
+afterwards. Chunk-level relations are version-pinned: re-ingesting a
+document mints new chunk ids, so chunk→chunk edges keep pointing at the
+retired version; document-level relations are stable across re-ingests.
+
+Relations are immutable after creation: to change a relation's type or
+endpoints, delete it and create a new one (ids are stable, so clients can
+re-create with the same id).
+
+## Relationship-aware retrieval (Phase 6)
+
+Any query mode accepts `expand`: run the base retrieval, then bounded
+BFS over relations seeded from the base hits, appending reached nodes
+with evidence (`{hops, path:[{relation_type, direction, relation_id}]}`).
+
+```bash
+curl -X POST localhost:8080/v1/collections/kb-main/query \
+  -H 'content-type: application/json' \
+  -d '{"text":"hello world","k":5,"mode":"lexical",
+       "expand":{"depth":2,"max_nodes":100,"relation_types":["references"]}}'
+# {"mode":"lexical","k":5,"expand":{"depth":2,"max_nodes":100},
+#  "hits":[ {"rank":1, ... base hit ...},
+#           {"rank":2,"id":"kb-main#c3d4...","score":1.0,
+#            "score_kind":"relationship","path":["relationship"],
+#            "document_id":"kb-main#c3d4...","source":"...",
+#            "metadata":{...},
+#            "evidence":{"hops":1,"path":[
+#              {"relation_id":"rel-guide-advanced","relation_type":"references",
+#               "direction":"outgoing"}]}} ]}
+```
+
+Defaults: `depth` 3 (max 5), `max_nodes` 100 (max 1000); a per-node
+fan-out cap of 64 and a 2000 ms wall-clock backstop apply always.
+Expanded hits never carry `vector_id`/`distance`; `score` is the hop
+count (lower is better) and is never comparable with base-hit scores.
+Full semantics: `docs/retrieval.md`; live smoke test:
+`docs/e2e-relations.sh`.
 
 ## Ingestion (Phase 4)
 
