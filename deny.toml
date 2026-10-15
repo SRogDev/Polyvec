@@ -37,6 +37,13 @@ exceptions = [
     # Unicode-3.0 covers its Unicode data tables; it is permissive,
     # OSI-approved, and non-copyleft. Unavoidable in any thiserror-based tree.
     { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+    # foldhash (Zlib) is a transitive dep of hnsw_rs via hashbrown
+    # (hnsw_rs → hashbrown → foldhash). Zlib is a tiny OSI-approved
+    # permissive license, GPL-compatible, non-copyleft. Unavoidable without
+    # forking hnsw_rs; the Phase 1 license audit explicitly allows
+    # explicitly-reviewed permissive licenses via documented exceptions
+    # (coordinator decision 2026-10-15, reversible by Roger).
+    { allow = ["Zlib"], crate = "foldhash" },
 ]
 include-dev = true
 

@@ -20,8 +20,8 @@ phase is done, execution is running):
 | ----- | ----- | ------ |
 | 0 | Repository & architecture foundation | done (PR #3) |
 | 1 | Crate audit + persistence/index prototype | done |
-| 2 | Core domain + persistent vector database | next |
-| 3 | Server and public API (Actix Web) | planned |
+| 2 | Core domain + persistent vector database | done |
+| 3 | Server and public API (Actix Web) | next |
 | 4 | Canonical model + ingestion pipeline | planned |
 | 5 | Lexical and hybrid retrieval | planned |
 | 6 | Integrated relationship retrieval | planned |
@@ -34,10 +34,23 @@ Progress is tracked in `STATUS.md`; each phase ships as its own PR.
 ## Layout
 
 ```text
-crates/polyvec-core/   # domain types, IDs, config contracts, shared Error
-docs/decisions/        # architecture decision records (ADRs)
-docs/audit/            # crate & license audit reports
+crates/polyvec-core/      # domain types, IDs, config contracts, shared Error
+crates/polyvec-index/     # hnsw_rs ANN wrapper, Polyvec-owned tombstones, exact-search baseline
+crates/polyvec-storage/   # redb-backed CollectionStore: catalog, persistence layout, recovery
+docs/decisions/           # architecture decision records (ADRs)
+docs/audit/               # crate & license audit reports
 ```
+
+**Phase 2 in one paragraph:** `CollectionStore::create/open` manages one
+collection directory (`catalog.redb` + `index.hnsw.{graph,data}` +
+`sidecar.json`). Vectors are validated (dimension, finiteness), inserted
+into the HNSW index (cosine/L2), and searchable via a Rust API; updates are
+*tombstone + reinsert*, deletes hide immediately via the tombstone set and
+are compacted by rebuilds. The commit protocol is documented honestly in
+`docs/decisions/ADR-004-storage-commit-protocol.md`: redb commits first
+(source of truth), the index dump is a checksummed, rebuildable cache —
+restart recovery is asserted in tests (measured recall@10 = 1.0000 vs the
+exact baseline at N=2000, dim=64).
 
 `deny.toml` enforces the dependency policy (MIT/Apache-2.0 only — see
 `CONTRIBUTING.md`); `cargo audit` runs in CI.

@@ -1,0 +1,18 @@
+[package]
+name = "polyvec-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Vector index layer for Polyvec: hnsw_rs ANN wrapper with Polyvec-owned tombstones, exact-search baseline"
+
+[lints]
+workspace = true
+
+[dependencies]
+polyvec-core.workspace = true
+hnsw_rs.workspace = true
+thiserror.workspace = true
