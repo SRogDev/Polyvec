@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 use polyvec_core::{
     Chunk, ChunkId, CollectionConfig, CollectionLifecycle, Document, DocumentId, Error,
-    INDEX_FORMAT_VERSION, IndexState, Result, SyncStatus, Vector, VectorId,
+    INDEX_FORMAT_VERSION, IndexState, ModelTag, Result, SyncStatus, Vector, VectorId,
 };
 use polyvec_index::{AnnIndex, TombstoneSet};
 
@@ -628,6 +628,100 @@ impl CollectionStore {
             self.documents += 1;
         }
         self.chunks = self.chunks - old_chunks + chunks.len() as u64;
+        Ok(())
+    }
+
+    /// Writes one document version atomically from the ingestion pipeline:
+    /// tombstones the previous version's vectors, removes its chunks, then
+    /// stores the new document, chunks, and vectors.
+    ///
+    /// The caller assigns version-scoped chunk ids (see
+    /// [`polyvec_core::ChunkId::for_versioned_index`]), so the new vectors
+    /// never collide with the tombstoned old ones. Old vectors hide from
+    /// search immediately (tombstone post-filter); the vector batch itself
+    /// is atomic via [`CollectionStore::insert_vectors`].
+    ///
+    /// If the vector insert fails, the document and chunks are stored but no
+    /// vectors are — the ingestion runner treats this as a retryable partial
+    /// write and re-runs the same version idempotently.
+    ///
+    /// # Errors
+    /// [`Error::Validation`] if a chunk belongs to another document or a
+    /// vector is invalid; [`Error::AlreadyExists`] on live vector id
+    /// collision; [`Error::Storage`] on I/O failures.
+    pub fn ingest_document(
+        &mut self,
+        doc: &Document,
+        chunks: &[Chunk],
+        vectors: &[Vector],
+    ) -> Result<()> {
+        for chunk in chunks {
+            if chunk.document_id != doc.id {
+                return Err(Error::Validation {
+                    detail: format!(
+                        "chunk '{}' belongs to document '{}', not '{}'",
+                        chunk.id, chunk.document_id, doc.id
+                    ),
+                });
+            }
+        }
+        // Retire the previous version: tombstone its vectors (immediately
+        // hidden from search) and drop its chunk records.
+        let old_chunks = self.catalog.chunks_of(&doc.id)?;
+        let is_new = self.catalog.document_get(&doc.id)?.is_none();
+        for chunk in &old_chunks {
+            let vector_id = VectorId::for_chunk(&chunk.id);
+            if let Some(record) = self.catalog.vector_get(&vector_id)? {
+                if !record.tombstoned {
+                    self.catalog.vector_tombstone(&vector_id)?;
+                    self.tombstones.insert(node_idx(record.node_id));
+                    self.live_vectors -= 1;
+                }
+            }
+            self.catalog.chunk_remove(&chunk.id)?;
+        }
+        // Store the new version.
+        self.catalog.document_put(doc)?;
+        for chunk in chunks {
+            self.catalog.chunk_put(chunk)?;
+        }
+        // Atomic vector batch (validates dimension/dupes/collisions first).
+        self.insert_vectors(vectors.to_vec())?;
+        if is_new {
+            self.documents += 1;
+        }
+        self.chunks = self.chunks - old_chunks.len() as u64 + chunks.len() as u64;
+        Ok(())
+    }
+
+    /// Claims the collection for an embedding model (one-time).
+    ///
+    /// Sets the config's model tag and persists it. Setting the same tag
+    /// twice is a no-op; a *different* tag is refused — vectors from two
+    /// models must never mix silently in one collection.
+    ///
+    /// # Errors
+    /// [`Error::AlreadyExists`] if another model tag is already set;
+    /// [`Error::Storage`] if the config cannot be persisted.
+    pub fn stamp_model_tag(&mut self, tag: &ModelTag) -> Result<()> {
+        match &self.config.model {
+            Some(existing) if *existing == *tag => return Ok(()),
+            Some(existing) => {
+                return Err(Error::AlreadyExists {
+                    what: format!(
+                        "collection '{}' already uses model {} {}; refusing {} {}",
+                        self.config.name, existing.name, existing.version, tag.name, tag.version
+                    ),
+                });
+            }
+            None => {}
+        }
+        self.config.model = Some(tag.clone());
+        let mut record = self.catalog.collection_get()?.ok_or_else(|| Error::Corrupt {
+            detail: "collection record missing while stamping model tag".to_string(),
+        })?;
+        record.config = self.config.clone();
+        self.catalog.collection_put(&record)?;
         Ok(())
     }
 
