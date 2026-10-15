@@ -13,9 +13,11 @@
 
 mod catalog;
 mod layout;
+mod relations;
 mod store;
 
 pub use layout::{DUMP_BASENAME, SIDECAR_NAME, Sidecar};
+pub use relations::RelationQuery;
 pub use store::{
     CollectionStore, Recovery, SearchHit, Stats, StoredVector, read_collection_config,
 };
