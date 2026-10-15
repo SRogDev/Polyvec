@@ -1,0 +1,8 @@
+Polyvec benchmark fixture: plain text.
+
+A vector database stores embeddings and retrieves them by similarity.
+This fixture exercises the plain-text conversion path: no markup,
+just paragraphs separated by blank lines.
+
+Second paragraph here, with a few more words to give the chunker
+something to chew on. The quick brown fox jumps over the lazy dog.
