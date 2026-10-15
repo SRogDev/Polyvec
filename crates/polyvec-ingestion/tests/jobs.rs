@@ -7,7 +7,7 @@
 
 use polyvec_core::{
     Chunk, CollectionConfig, CollectionId, Document, DocumentId, Error, Metadata, ModelTag, Result,
-    Vector,
+    Vector, VectorId,
 };
 use polyvec_embeddings::{EmbedError, EmbeddingProvider, StubEmbeddingProvider};
 use polyvec_ingestion::{
@@ -54,11 +54,14 @@ impl TestDocStore {
 }
 
 impl DocStore for TestDocStore {
-    fn config(&self) -> CollectionConfig {
-        self.store.lock().unwrap().config().clone()
+    fn config(&self) -> Result<CollectionConfig> {
+        Ok(self.store.lock().unwrap().config().clone())
     }
     fn get_document(&self, id: &DocumentId) -> Result<Option<(Document, Vec<Chunk>)>> {
         Ok(self.store.lock().unwrap().get_document(id).ok())
+    }
+    fn vectors_present(&self, chunks: &[Chunk]) -> Result<bool> {
+        self.store.lock().unwrap().vectors_present(chunks)
     }
     fn ingest_document(&self, doc: &Document, chunks: &[Chunk], vectors: &[Vector]) -> Result<()> {
         self.store
@@ -329,7 +332,7 @@ async fn ingest_end_to_end_bytes_to_searchable_vectors() {
     req.mime = Some("text/html".to_string());
     let id = runner.try_submit_ingest(req).unwrap();
     let job = wait_done(&runner, &id).await;
-    assert_eq!(job.state, JobState::Done);
+    assert_eq!(job.state, JobState::Done, "error: {:?}", job.error);
     let affected = job.affected.unwrap();
     assert_eq!(affected.version, 1);
     assert!(!affected.skipped);
@@ -369,6 +372,58 @@ async fn ingest_end_to_end_bytes_to_searchable_vectors() {
         hits.iter().any(|h| h.vector_id == want),
         "chunk vector must be searchable"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_write_is_completed_not_reported_skipped() {
+    // A previous attempt stored the document + chunks but the vectors never
+    // landed (crash between transactions). Re-ingesting the same content
+    // must FINISH the work at the same version — never report "skipped"
+    // for a document with no searchable vectors.
+    let dir = tmp("partial");
+    let (runner, opener) = spawn_runner(&dir, Some(stub_provider()));
+    let content = "# Partial\n\nAlpha beta gamma delta.";
+
+    let id = runner
+        .try_submit_ingest(ingest_req("kb/guide.md", content))
+        .unwrap();
+    let job = wait_done(&runner, &id).await;
+    assert_eq!(job.state, JobState::Done);
+    assert_eq!(job.affected.as_ref().unwrap().version, 1);
+
+    // Simulate the partial write: remove the vectors, keep doc + chunks +
+    // the job store's doc record.
+    let coll = CollectionId::new("kb").unwrap();
+    let raw = opener.raw(&coll);
+    let doc_id = DocumentId::for_source(&coll, "kb/guide.md");
+    let (_doc, chunks) = raw.store.lock().unwrap().get_document(&doc_id).unwrap();
+    assert!(!chunks.is_empty());
+    {
+        let mut store = raw.store.lock().unwrap();
+        for chunk in &chunks {
+            store
+                .delete_vector(&VectorId::for_chunk(&chunk.id))
+                .unwrap();
+        }
+        assert!(!store.vectors_present(&chunks).unwrap());
+    }
+
+    // Re-ingest identical content: the pipeline must detect the missing
+    // vectors and complete version 1 (not bump to 2, not skip).
+    let id2 = runner
+        .try_submit_ingest(ingest_req("kb/guide.md", content))
+        .unwrap();
+    let job2 = wait_done(&runner, &id2).await;
+    assert_eq!(job2.state, JobState::Done, "error: {:?}", job2.error);
+    let affected = job2.affected.as_ref().unwrap();
+    assert!(!affected.skipped, "partial write must not be reported skipped");
+    assert_eq!(affected.version, 1, "must reuse the version, not bump");
+
+    // And the document is searchable again.
+    let provider = stub_provider();
+    let query = provider.embed(&["alpha beta gamma"]).unwrap().remove(0);
+    assert!(!raw.search(&query, 5, 32).is_empty());
+    runner.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

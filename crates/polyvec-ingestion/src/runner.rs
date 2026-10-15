@@ -47,10 +47,17 @@ use crate::jobs::{
 /// its per-collection `Mutex<CollectionStore>`.
 pub trait DocStore: Send + Sync {
     /// Snapshot of the collection config (dimension, model tag, chunking).
-    fn config(&self) -> CollectionConfig;
+    fn config(&self) -> Result<CollectionConfig>;
 
     /// Fetches a document and its chunks, if it exists.
     fn get_document(&self, id: &DocumentId) -> Result<Option<(Document, Vec<Chunk>)>>;
+
+    /// Returns `true` when every chunk in `chunks` has a live
+    /// (non-tombstoned) vector. The runner uses this on the
+    /// unchanged-content path to detect a partially-completed previous
+    /// attempt (document stored, vectors missing) — without it, a retry
+    /// would report "skipped" for a document with no searchable vectors.
+    fn vectors_present(&self, chunks: &[Chunk]) -> Result<bool>;
 
     /// Writes a document version atomically: tombstones the previous
     /// version's vectors, removes its chunks, then stores the new
@@ -656,7 +663,7 @@ fn run_ingest(
     req: &IngestRequest,
 ) -> PipelineResult<AffectedRecords> {
     let store = opener.open(&req.collection).map_err(PipelineError::from)?;
-    let config = store.config();
+    let config = store.config().map_err(PipelineError::from)?;
     let document_id = DocumentId::for_source(&req.collection, &req.source);
     let document_id_str = document_id.as_str().to_string();
 
@@ -673,34 +680,8 @@ fn run_ingest(
     let converted = inner.converter.convert(&req.content, &hint).map_err(PipelineError::from)?;
     let canonical = canonicalize(converted, &req.source, req.filename.as_deref(), &req.content);
 
-    // 2. Change detection: unchanged content (and chunking) → skip.
-    let existing = store.get_document(&document_id).map_err(PipelineError::from)?;
-    if let Some((doc, _)) = &existing {
-        let prev = inner
-            .store
-            .lock()
-            .expect("runner lock")
-            .get_doc_record(&document_id_str).map_err(PipelineError::from)?;
-        let chunking_same = prev
-            .as_ref()
-            .is_some_and(|r| r.chunking_version == config.chunking.version);
-        if doc.content_hash == canonical.canonical_hash && chunking_same {
-            log::info!(
-                "ingest job {}: content unchanged, skipping (version {})",
-                job.id,
-                doc.version
-            );
-            return Ok(AffectedRecords {
-                document_id: document_id_str,
-                version: doc.version,
-                chunks: 0,
-                vectors: 0,
-                skipped: true,
-            });
-        }
-    }
-
-    // 3. Chunk.
+    // 2. Chunk (before change detection: the skip path needs chunk ids to
+    //    verify the vectors actually made it).
     let chunker = Chunker::new(config.chunking.clone()).map_err(PipelineError::from)?;
     let raw = chunker.chunk(&canonical.markdown);
     if raw.is_empty() {
@@ -708,6 +689,66 @@ fn run_ingest(
             "document produced no chunks (empty after normalization)".to_string(),
         ));
     }
+
+    // 3. Change detection: unchanged content (and chunking) → skip, unless
+    //    a previous attempt stored the document without its vectors.
+    let existing = store.get_document(&document_id).map_err(PipelineError::from)?;
+    let prev = inner
+        .store
+        .lock()
+        .expect("runner lock")
+        .get_doc_record(&document_id_str)
+        .map_err(PipelineError::from)?;
+    let unchanged = match (&existing, &prev) {
+        (Some(_), Some(rec)) => {
+            rec.canonical_hash == canonical.canonical_hash.to_hex()
+                && rec.chunking_version == config.chunking.version
+        }
+        _ => false,
+    };
+    let version = if unchanged {
+        let version = prev.expect("record checked above").version;
+        // Partial-write guard: the hash matches, but did the vectors make
+        // it? Chunk ids are deterministic, so rebuild them and check.
+        let chunks: Vec<Chunk> = raw
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                Chunk::new_versioned(
+                    document_id.clone(),
+                    version,
+                    i as u32,
+                    &r.text,
+                    r.char_start,
+                    r.char_end,
+                )
+            })
+            .collect();
+        if store.vectors_present(&chunks).map_err(PipelineError::from)? {
+            log::info!(
+                "ingest job {}: content unchanged, skipping (version {})",
+                job.id,
+                version
+            );
+            return Ok(AffectedRecords {
+                document_id: document_id_str,
+                version,
+                chunks: 0,
+                vectors: 0,
+                skipped: true,
+            });
+        }
+        // Same content, same version, but the vectors never landed:
+        // re-ingest at the same version instead of bumping.
+        log::warn!(
+            "ingest job {}: unchanged content but vectors missing; re-ingesting version {}",
+            job.id,
+            version
+        );
+        version
+    } else {
+        existing.as_ref().map_or(1, |(d, _)| d.version + 1)
+    };
 
     // 4. Vectors: supplied path or provider path (never silently mixed).
     let dim = config.dimension;
@@ -743,7 +784,7 @@ fn run_ingest(
     };
 
     // 5. Build the document version, chunks, and vectors.
-    let version = existing.as_ref().map_or(1, |(d, _)| d.version + 1);
+    // (`version` was decided in step 3: bump on change, reuse on retry.)
     let mut metadata = existing.as_ref().map_or_else(Metadata::default, |(d, _)| d.metadata.clone());
     for (k, v) in req.metadata.iter() {
         metadata.insert(k.clone(), v.clone());
@@ -869,7 +910,7 @@ fn check_model_tag(
     provider: &dyn EmbeddingProvider,
 ) -> PipelineResult<()> {
     let tag = provider.model_id();
-    let config = store.config();
+    let config = store.config().map_err(PipelineError::from)?;
     match &config.model {
         Some(existing) if *existing != tag => Err(PipelineError::Permanent(format!(
             "model mismatch: collection uses {} {}, provider is {} {} — refusing to mix",

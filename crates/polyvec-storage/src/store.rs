@@ -725,6 +725,28 @@ impl CollectionStore {
         Ok(())
     }
 
+    /// Returns `true` when every chunk in `chunks` has a live
+    /// (non-tombstoned) vector in the catalog.
+    ///
+    /// The ingestion pipeline uses this on the unchanged-content path: a
+    /// previous attempt may have stored the document and chunks but failed
+    /// before the vector batch committed. Without this check, a retry would
+    /// see the unchanged hash and report "skipped" for a document that has
+    /// no searchable vectors — partial progress reported as complete.
+    ///
+    /// # Errors
+    /// [`Error::Storage`] if the catalog cannot be read.
+    pub fn vectors_present(&self, chunks: &[Chunk]) -> Result<bool> {
+        for chunk in chunks {
+            let vector_id = VectorId::for_chunk(&chunk.id);
+            match self.catalog.vector_get(&vector_id)? {
+                Some(record) if !record.tombstoned => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     /// Deletes a document, its chunks, and tombstones their vectors.
     ///
     /// # Errors

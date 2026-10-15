@@ -209,6 +209,15 @@ impl JobStore {
         }
         let db = Database::create(path).map_err(storage_error)?;
         let store = Self { db };
+        // Create all tables up front: opening a missing table on a READ
+        // transaction is an error in redb, and readers must not fail just
+        // because no writer has run yet.
+        let write = store.db.begin_write().map_err(storage_error)?;
+        write.open_table(T_JOBS).map_err(storage_error)?;
+        write.open_table(T_IDEMPOTENCY).map_err(storage_error)?;
+        write.open_table(T_DOC_RECORDS).map_err(storage_error)?;
+        write.open_table(T_META).map_err(storage_error)?;
+        write.commit().map_err(storage_error)?;
         store.fail_inflight()?;
         Ok(store)
     }
