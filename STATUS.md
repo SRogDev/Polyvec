@@ -4,20 +4,37 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 8 — documentation and AI-native DX: **done on branch
-  `phase-8-docs`** (3 commits, awaiting coordinator review/PR). Delivered:
-  Astro Starlight site in `site/` (20 pages, pinned astro 7.4.0 +
-  @astrojs/starlight 0.42.6, `npm ci && npm run build` green, 21 pages,
-  deploy-ready), versioned AI integration prompt `integrate-polyvec/v1.md`
-  (mirrored in the site) with a live end-to-end test record (16/16 checks
-  passed against a real local server), and a docs consistency sweep
-  (README/STATUS/ARCHITECTURE/docs/API/docs/PROJECT_BRIEF aligned with
-  code). Pending Roger: Vercel project creation (the Vercel connection is
-  degraded; the site ships deploy-ready with manual import documented in
-  `site/README.md`).
+- Phase 9 — MVP release preparation (final phase of the definitive plan):
+  **in progress on branch `phase-9-release`** (no push, no PR, no tag —
+  the coordinator verifies the release checklist and cuts the tag).
+  Verifying the 14-item release definition of done (plan §22) with live
+  evidence, making the README release-ready, writing release notes
+  (`docs/RELEASE_NOTES_v0.1.0.md`) + `docs/RELEASING.md`. Known gaps
+  recorded in the notes: `.github/workflows/ci.yml` still local-only
+  (token lacks `workflows` scope), Vercel project creation manual,
+  `cargo audit` unbuildable in sandbox.
+
+### Release checklist state (Phase 9, evidence 2026-10-15 on `phase-9-release`)
+
+| # | Item | Verdict |
+|---|------|---------|
+| 1 | Self-hosted Rust vector DB, own persistence/indexing path | PASS — own redb+hnsw_rs path; `cargo tree` grep for qdrant/pinecone/chroma/lancedb/milvus/weaviate/pgvector: no hits |
+| 2 | Documented server API (docs/API.md + site match code) | PASS — all 14 `/v1` routes in code present in docs/API.md + exercised by e2e scripts |
+| 3 | Ingestion into canonical, provenance-aware model | PASS — e2e-ingestion.sh 8/8 (HTML→canonical→chunk→provenance) |
+| 4 | Pluggable embeddings + precomputed vectors | PASS — provider trait + stub/remote adapters + supplied-vectors path (tests green) |
+| 5 | Vector, lexical, hybrid, bounded relationship retrieval | PASS — e2e-retrieval.sh 25/25, e2e-relations.sh 24/24 |
+| 6 | Update/delete propagation (no stale evidence) | PASS — covered by #5 scripts + `vectors_present` guard (update→v2, delete→0 hits) |
+| 7 | Restart/recovery tested | PASS — storage recovery tests green + SIGTERM→restart in e2e.sh 31/31 |
+| 8 | Performance baselines reproducible | PASS — BENCHMARKS.md present, harness committed, coordinator re-ran layer A (same ballpark) |
+| 9 | Deps audited | PASS — `cargo deny check` green; license-audit.md current incl. v0.1.0 addendum; MPL-2.0 flag still noted |
+| 10 | Diagnostics + actionable errors | PASS — e2e.sh checks 400/404/409 + `{code,message,detail}` body shape |
+| 11 | Docs site builds, Vercel-ready | PASS — 21 pages, pagefind index, exit 0; Vercel import manual (pending Roger) |
+| 12 | AI integration prompt e2e | PASS — Phase 8 record 16/16; re-smoked on this branch (healthz→201→ingest done→hybrid rrf hit) |
+| 13 | SaaS.md future-only, nothing contradicts | PASS — SaaS.md present (plan §20 list); codebase grep: no multi-tenancy/billing/clustering claims |
+| 14 | Limitations + future work documented | PASS — README known limitations + docs/RELEASE_NOTES_v0.1.0.md |
 
 ## Done
-- 2026-10-15 — **Phase 8 done** (branch `phase-8-docs`, 3 commits):
+- 2026-10-15 — **Phase 8 merged** (PR #12, squash-merged `334d654`):
   documentation website + AI-native DX. Astro Starlight site in `site/`
   (20 pages, pinned astro 7.4.0 / @astrojs/starlight 0.42.6,
   package-lock.json committed; `npm ci && npm run build` green, 21 pages
@@ -32,9 +49,9 @@
   docs/PROJECT_BRIEF stack/questions); verified all 19 `POLYVEC_*` env
   vars in code are documented in docs/API.md + site configuration page.
   Honesty ledger honored: stub = mechanics-only, no invented metrics,
-  MPL-2.0 flag preserved. Pending: Vercel project creation (manual; site
-  is deploy-ready).
-- 2026-10-15 — **Phase 7 done** (branch `phase-7-harden`, 6 commits):
+  MPL-2.0 flag preserved. Pending Roger: Vercel project creation
+  (manual; site is deploy-ready).
+- 2026-10-15 — **Phase 7 done** (PR #11, squash-merged):
   reliability, quality and performance. No new product features except
   the two Phase 3-deferred security items, now **implemented**:
   bearer-token auth (`POLYVEC_API_KEY`, constant-time compare, key
@@ -56,7 +73,7 @@
   Qdrant comparison not performed (no container runtime; documented
   as infeasible, no uncontrolled numbers). Known limitations in
   README.md and BENCHMARKS.md.
-- 2026-10-15 — **Phase 6 done** (branch `phase-6-relations`, unmerged):
+- 2026-10-15 — **Phase 6 done** (PR #10, squash-merged `f76b810`):
   integrated relationship retrieval. Typed, directed, explicitly-supplied
   relations (fixed vocabulary: `references`, `related_to`, `supersedes`;
   stable ids + provenance metadata + server-stamped `created_at`) stored
