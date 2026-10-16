@@ -17,3 +17,8 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Docs site (Astro) — build from source; lockfile IS committed
+site/node_modules/
+site/dist/
+site/.astro/

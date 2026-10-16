@@ -25,8 +25,8 @@ phase is done, execution is running):
 | 4 | Canonical model + ingestion pipeline | done |
 | 5 | Lexical and hybrid retrieval | done |
 | 6 | Integrated relationship retrieval | done |
-| 7 | Reliability, quality and performance | done (this branch) |
-| 8 | Documentation and AI-native DX | planned |
+| 7 | Reliability, quality and performance | done |
+| 8 | Documentation and AI-native DX | in progress |
 | 9 | MVP release | planned |
 
 Progress is tracked in `STATUS.md`; each phase ships as its own PR.
@@ -47,6 +47,8 @@ docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
 docs/API.md               # HTTP API reference with curl examples
 docs/ingestion.md         # ingestion pipeline + cost-guard mechanisms
+integrate-polyvec/        # versioned AI integration prompt (v1) + live test record
+site/                     # Astro Starlight docs site (deploy-ready; Vercel import pending)
 ```
 
 **Phase 2 in one paragraph:** `CollectionStore::create/open` manages one

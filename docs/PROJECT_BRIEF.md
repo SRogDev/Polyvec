@@ -18,11 +18,21 @@ A company knowledge-base vector DB in Rust, optimized for massive cheap reads by
 - Read-optimized for agent workloads; future knowledge layer of Polygrow.
 
 ## Stack
-Rust (crates/TBD from research).
+Rust (8 workspace crates: polyvec-{core, index, storage, server, ingestion,
+embeddings, retrieval, bench}; vendored markit; Actix Web + Tokio HTTP
+server; hnsw_rs + redb + tantivy). See `ARCHITECTURE.md`.
 
 ## Business model
 Infrastructure for Polygrow — no standalone business model yet.
 
 ## Open questions
-- Which index structures (HNSW variants, quantization) fit the read-heavy agent pattern.
-- API shape: how agents will query it.
+- ~~Which index structures (HNSW variants, quantization) fit the read-heavy agent pattern.~~
+  → Resolved (Phase 1 audit, Phase 2/7): hnsw_rs HNSW; quantization not yet
+  evaluated (see limitations).
+- ~~API shape: how agents will query it.~~
+  → Resolved (Phases 3–6): versioned `/v1` REST API with vector, lexical,
+  hybrid (RRF), and relationship-expand retrieval modes; ingestion jobs
+  pipeline. See `docs/API.md`.
+- Which embedding provider(s) a real deployment should use (currently
+  pluggable: `none` | `stub` (dev/test) | OpenAI-compatible `remote`;
+  model choice is the operator's and is stamped per collection).
