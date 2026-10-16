@@ -30,6 +30,7 @@ Polyvec/
 │   └── polyvec-bench/          # Phase 7. fixtures, Criterion benches, bench_report.
 ├── vendor/markit/              # vendored markit (pinned 4197c76a, HTTP stubbed — Phase 4)
 ├── integrate-polyvec/          # versioned AI integration prompt + live test record (Phase 8)
+├── site/                       # Astro Starlight docs site, deploy-ready (Phase 8)
 ├── docs/
 │   ├── PROJECT_BRIEF.md        # full context handoff for another AI
 │   ├── API.md                  # HTTP API reference + curl examples

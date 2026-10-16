@@ -1,0 +1,1 @@
+{"dependencies":{"@astrojs/starlight":"0.42.6","astro":"7.4.0"},"description":"Polyvec documentation site (Astro Starlight)","engines":{"node":">=20"},"name":"polyvec-docs","private":true,"scripts":{"build":"astro build","dev":"astro dev","preview":"astro preview"},"type":"module","version":"0.1.0"}

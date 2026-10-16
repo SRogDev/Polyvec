@@ -47,6 +47,8 @@ docs/decisions/           # architecture decision records (ADRs)
 docs/audit/               # crate & license audit reports
 docs/API.md               # HTTP API reference with curl examples
 docs/ingestion.md         # ingestion pipeline + cost-guard mechanisms
+integrate-polyvec/        # versioned AI integration prompt (v1) + live test record
+site/                     # Astro Starlight docs site (deploy-ready; Vercel import pending)
 ```
 
 **Phase 2 in one paragraph:** `CollectionStore::create/open` manages one

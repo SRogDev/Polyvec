@@ -1,0 +1,69 @@
+---
+title: Polyvec
+description: A from-scratch Rust vector database optimized for massive, cheap, high-recall reads of company knowledge by AI agents.
+template: splash
+hero:
+  tagline: A company knowledge-base vector database, built from scratch in Rust — optimized for massive, cheap, high-recall reads by agents.
+  actions:
+    - text: Quickstart
+      link: /quickstart/
+      icon: right-arrow
+    - text: API reference
+      link: /api-reference/
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What Polyvec is
+
+Agents should be able to query a company's entire knowledge base constantly —
+thousands of reads per day per agent — at negligible cost. Existing vector
+databases optimize for the general case; Polyvec optimizes for one workload:
+**massive, cheap, high-recall reads over company knowledge**.
+
+It is the future knowledge layer of [Polygrow](https://github.com/SRogDev/Polygrow).
+It is not a general-purpose Pinecone/Qdrant replacement, and it is not a
+memory layer (episodic/conversational memory stays separate).
+
+<CardGrid>
+  <Card title="Vector + lexical + hybrid" icon="magnifier">
+    HNSW vector search, tantivy BM25 lexical search, and Reciprocal Rank
+    Fusion hybrid retrieval — one result schema, with documented,
+    never-cross-comparable scores.
+  </Card>
+  <Card title="Ingestion pipeline" icon="document">
+    HTML, Markdown, plain text, and CSV → deterministic canonical Markdown →
+    section-aware chunks → embeddings (your provider or supplied vectors) →
+    atomic store write. Persisted jobs, bounded retries, backpressure.
+  </Card>
+  <Card title="Relationship-aware retrieval" icon="hierarchy">
+    Typed, directed relations you supply (<code>references</code>,
+    <code>related_to</code>, <code>supersedes</code>) expand any query with
+    bounded, evidence-carrying BFS traversal.
+  </Card>
+  <Card title="Durable by construction" icon="approve-check">
+    Every write commits to redb first; the ANN index is a checksummed,
+    rebuildable cache. Restart recovery is asserted in tests.
+  </Card>
+</CardGrid>
+
+## Honest scope
+
+- **Pre-release (v0.x).** The engine is real and tested (244 workspace
+  tests), but there are no tagged releases yet — see
+  [Limitations & roadmap](/project/limitations/).
+- Retrieval-quality numbers in [Performance](/operations/performance/)
+  measure pipeline mechanics with a stub embedding provider (a hash
+  function), not semantic search quality. No cross-system comparisons are
+  published.
+- The server binds **localhost only by default**; auth is opt-in. Read
+  [Security](/operations/security/) before exposing it.
+
+## Next steps
+
+- [Install Polyvec](/installation/) — build from source in minutes.
+- [Run the quickstart](/quickstart/) — first searchable document in under five minutes.
+- [Integrate with an AI agent](/project/ai-integration/) — the versioned
+  integration prompt with a real end-to-end verification requirement.
