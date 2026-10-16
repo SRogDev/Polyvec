@@ -26,10 +26,53 @@ phase is done, execution is running):
 | 5 | Lexical and hybrid retrieval | done |
 | 6 | Integrated relationship retrieval | done |
 | 7 | Reliability, quality and performance | done |
-| 8 | Documentation and AI-native DX | in progress |
-| 9 | MVP release | planned |
+| 8 | Documentation and AI-native DX | done (PR #12) |
+| 9 | MVP release | in progress |
 
 Progress is tracked in `STATUS.md`; each phase ships as its own PR.
+
+## Install
+
+```bash
+git clone https://github.com/SRogDev/Polyvec.git && cd Polyvec
+cargo build --release -p polyvec-server   # binary: target/release/polyvec-server
+```
+
+- Requires Rust **1.85+** (edition 2024; built and tested with **1.98.1**).
+- Tested on **Linux x86_64**. Other OSes/architectures are untested —
+  see "Known limitations".
+- `Cargo.lock` is committed: the same dependency tree builds
+  reproducibly (license policy enforced by `deny.toml`).
+
+## Quickstart
+
+```bash
+# Start the server (defaults: 127.0.0.1:8080, ./polyvec-data)
+./target/release/polyvec-server
+
+curl localhost:8080/healthz   # {"status":"ok","service":"polyvec","version":"0.1.0"}
+
+# Create a collection (201). metric: "l2" or "cosine"; dimension 1..4096.
+curl -X POST localhost:8080/v1/collections \
+  -H 'content-type: application/json' \
+  -d '{"id":"kb","dimension":3,"metric":"cosine"}'
+
+# Insert vectors (single or atomic batch {"vectors":[...]} — 201).
+curl -X POST localhost:8080/v1/collections/kb/vectors \
+  -H 'content-type: application/json' \
+  -d '{"vectors":[{"id":"vec-1","values":[0.1,0.2,0.3]}]}'
+
+# Search (k = 1..1000).
+curl -X POST localhost:8080/v1/collections/kb/vectors/search \
+  -H 'content-type: application/json' \
+  -d '{"vector":[0.1,0.2,0.3],"k":10}'
+# {"hits":[{"id":"vec-1","distance":0.0},...],"k":10,...}
+```
+
+Full reference: `docs/API.md`. Runnable live smoke test covering every
+endpoint (success + error cases + SIGTERM→restart durability):
+`./docs/e2e.sh`. Configuration reference (all 19 `POLYVEC_*` env vars):
+`docs/API.md` and the site page *Configuration*.
 
 ## Layout
 
@@ -148,6 +191,7 @@ restart durability). Results in `BENCHMARKS.md` — measured, not claimed.
 
 ## Known limitations
 
+- Only Linux x86_64 is tested; other platforms are unverified.
 - The stub embedding provider is a hash function: retrieval quality
   numbers measure pipeline mechanics, not semantic search quality.
 - Benchmarks are single-machine, single-workload, release profile;
@@ -158,6 +202,12 @@ restart durability). Results in `BENCHMARKS.md` — measured, not claimed.
   covered at the storage layer and graceful-shutdown recovery over HTTP.
 - `cargo audit` does not build in this sandbox (linker env quirk);
   advisory coverage comes from `cargo deny check` (`advisories`).
+- CI (`.github/workflows/ci.yml`) is written but not yet committed —
+  the stored GitHub token lacks the `workflows` scope; commit it with a
+  full-scope token (pending Roger). The docs-site Vercel project is
+  deploy-ready but must be created manually (Vercel connection degraded).
+- No new features land after this point without a release-blocker
+  justification; see `docs/RELEASE_NOTES_v0.1.0.md`.
 
 ## License
 
