@@ -162,3 +162,32 @@ exceptions, no new transitive licenses.
 
 **No GPL/AGPL anywhere in the Phase 6 tree.** Verified via `cargo deny check`
 (green 2026-10-15).
+
+## Release re-verification — v0.1.0 (Phase 9, 2026-10-15)
+
+**Phase 7 additions:** `criterion` 0.8.2 (dev-only benchmark dep for
+`polyvec-bench`; never shipped in the server binary) + transitives
+(`tinytemplate`, `oorandom`, `cast`, `clap`, `criterion-plot`). All
+carry **MIT OR Apache-2.0** license expressions (verified from crates.io
+metadata on 2026-10-15). No new license class, no new `deny.toml`
+exception needed.
+
+**Phase 8 additions:** the docs site (`site/`, npm: astro 7.4.0 +
+@astrojs/starlight 0.42.6, pinned via `package-lock.json`). npm
+dependencies are outside the `deny.toml` policy (Cargo-only); they ship
+documentation only, not the database binary. License scan of the npm
+tree is **not performed** in this release (documented gap — the site is
+docs-only; add an npm license policy when the site gains
+user-facing functionality).
+
+**MPL-2.0 flag (Phase 4) still noted:** `cssparser` 0.37.0 +
+`selectors` 0.38.0 via the vendored markit HTML parser — weak
+file-scoped copyleft, documented exception, reversible by dropping HTML
+conversion, flagged for Roger's review. Unchanged in the release tree.
+
+**Release-tree verdict:** `cargo deny check` green on the
+`phase-9-release` branch (advisories + bans + licenses + sources,
+2026-10-15). **No GPL/AGPL anywhere in the v0.1.0 tree.**
+`cargo audit` still does not build in this sandbox (linker env quirk,
+reproduced since Phase 0); advisory coverage comes from `cargo deny`'s
+`advisories` source.
