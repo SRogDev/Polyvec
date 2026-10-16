@@ -4,12 +4,36 @@
 > Read this before starting work. Update it in the same PR when reality changes.
 
 ## In progress / blocked
-- Phase 8 — documentation and AI-native DX (branch `phase-8-docs`): docs
-  site, versioned AI integration prompt with a live end-to-end test,
-  docs consistency sweep. Pending Roger: Vercel project creation (the
-  Vercel connection is degraded; the site ships deploy-ready).
+- Phase 8 — documentation and AI-native DX: **done on branch
+  `phase-8-docs`** (3 commits, awaiting coordinator review/PR). Delivered:
+  Astro Starlight site in `site/` (20 pages, pinned astro 7.4.0 +
+  @astrojs/starlight 0.42.6, `npm ci && npm run build` green, 21 pages,
+  deploy-ready), versioned AI integration prompt `integrate-polyvec/v1.md`
+  (mirrored in the site) with a live end-to-end test record (16/16 checks
+  passed against a real local server), and a docs consistency sweep
+  (README/STATUS/ARCHITECTURE/docs/API/docs/PROJECT_BRIEF aligned with
+  code). Pending Roger: Vercel project creation (the Vercel connection is
+  degraded; the site ships deploy-ready with manual import documented in
+  `site/README.md`).
 
 ## Done
+- 2026-10-15 — **Phase 8 done** (branch `phase-8-docs`, 3 commits):
+  documentation website + AI-native DX. Astro Starlight site in `site/`
+  (20 pages, pinned astro 7.4.0 / @astrojs/starlight 0.42.6,
+  package-lock.json committed; `npm ci && npm run build` green, 21 pages
+  incl. 404, pagefind search). Versioned AI integration prompt
+  `integrate-polyvec/v1.md` (+ site mirror) with live e2e test record:
+  throwaway stdlib-Python client followed the prompt against a real local
+  `polyvec-server` — 16/16 checks passed (collection create, ingest job
+  lifecycle, lexical + vector queries, evidence fields, negative query 0
+  hits, typed 404); v1 needed no fixes. Docs consistency sweep: corrected
+  stale drift (docs/API.md auth note, STATUS phase table, README phase
+  table, ARCHITECTURE layout + BENCHMARKS/SECURITY descriptions,
+  docs/PROJECT_BRIEF stack/questions); verified all 19 `POLYVEC_*` env
+  vars in code are documented in docs/API.md + site configuration page.
+  Honesty ledger honored: stub = mechanics-only, no invented metrics,
+  MPL-2.0 flag preserved. Pending: Vercel project creation (manual; site
+  is deploy-ready).
 - 2026-10-15 — **Phase 7 done** (branch `phase-7-harden`, 6 commits):
   reliability, quality and performance. No new product features except
   the two Phase 3-deferred security items, now **implemented**:
